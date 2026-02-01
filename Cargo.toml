@@ -16,7 +16,7 @@ categories = ["asynchronous", "concurrency"]
 rust-version = "1.85"
 
 [dependencies]
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1.49", features = ["full"] }
 async-trait = "0.1"
 thiserror = "2.0"
 bincode = "2.0"
