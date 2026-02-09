@@ -271,7 +271,7 @@ impl<W: Worker> SupervisorRuntime<W> {
             "reason" => ?reason
         );
 
-        let position = match self.children.iter().position(|c| c.id() == &id) {
+        let position = match self.children.iter().position(|c| c.id() == id) {
             Some(pos) => pos,
             None => {
                 slog::warn!(slog_scope::logger(), "terminated child not found in list";
