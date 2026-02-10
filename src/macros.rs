@@ -62,6 +62,43 @@ macro_rules! impl_worker_stateful {
     };
 }
 
+/// Implement the Worker trait with a mailbox for message-passing workers
+///
+/// This macro creates a worker that receives string messages from a mailbox.
+/// The worker will loop receiving messages until the mailbox is closed.
+/// The process body should not return a Result - just process the message.
+///
+/// # Examples
+///
+/// ```
+/// use ash_flare::impl_worker_mailbox;
+///
+/// struct MessageWorker {
+///     worker_id: usize,
+///     mailbox: ash_flare::Mailbox,
+/// }
+///
+/// impl_worker_mailbox! {
+///     MessageWorker, std::io::Error => |self, msg| {
+///         println!("[Worker {}] Received: {}", self.worker_id, msg);
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! impl_worker_mailbox {
+    ($worker:ty, $error:ty => |$self:ident, $msg:ident| $process_body:block) => {
+        #[async_trait::async_trait]
+        impl $crate::Worker for $worker {
+            type Error = $error;
+
+            async fn run(&mut $self) -> Result<(), Self::Error> {
+                while let Some($msg) = $self.mailbox.recv().await $process_body
+                Ok(())
+            }
+        }
+    };
+}
+
 /// Build a stateful supervision tree with shared in-memory key-value store
 ///
 /// # Examples

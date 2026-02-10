@@ -62,6 +62,8 @@ graph LR
         worker[worker.rs<br/>Worker Trait & Process]
         supervisor[supervisor.rs<br/>Supervisor Logic]
         distributed[distributed.rs<br/>Network Layer]
+        mailbox[mailbox.rs<br/>Message Passing]
+        macros[macros.rs<br/>Convenience Macros]
     end
 
     lib --> restart
@@ -69,6 +71,8 @@ graph LR
     lib --> worker
     lib --> supervisor
     lib --> distributed
+    lib --> mailbox
+    lib --> macros
     
     types --> restart
     worker --> types
@@ -246,4 +250,56 @@ stateDiagram-v2
     
     Failed --> Restarting: RestartPolicy applies
     Restarting --> Created: Create new instance
+```
+
+## Start-Link Initialization
+
+```mermaid
+sequenceDiagram
+    participant Supervisor
+    participant WorkerProcess
+    participant Worker
+
+    Supervisor->>WorkerProcess: spawn worker
+    WorkerProcess->>Worker: initialize()
+    
+    alt Initialization Success
+        Worker-->>WorkerProcess: Ok(())
+        WorkerProcess->>Supervisor: child ready
+        WorkerProcess->>Worker: run()
+    else Initialization Failure
+        Worker-->>WorkerProcess: Err
+        WorkerProcess->>Supervisor: child failed (not started)
+        Note over Supervisor: Apply restart policy
+    end
+```
+
+## Mailbox Communication
+
+```mermaid
+graph TB
+    subgraph "Worker Pool Pattern"
+        Producer[Producer]
+        SharedMB[Arc&lt;Mutex&lt;Mailbox&gt;&gt;]
+        W1[Worker 1]
+        W2[Worker 2]
+        W3[Worker 3]
+        
+        Producer -->|send| SharedMB
+        SharedMB -->|recv| W1
+        SharedMB -->|recv| W2
+        SharedMB -->|recv| W3
+    end
+
+    subgraph "Peer-to-Peer Pattern"
+        WA[Worker A]
+        MBA[Mailbox A]
+        WB[Worker B]
+        MBB[Mailbox B]
+        
+        WA -->|send| MBB
+        MBB -->|recv| WB
+        WB -->|send| MBA
+        MBA -->|recv| WA
+    end
 ```

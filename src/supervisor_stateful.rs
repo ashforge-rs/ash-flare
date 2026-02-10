@@ -151,7 +151,36 @@ impl<W: Worker> StatefulWorkerProcess<W> {
         let worker = spec.create_worker();
         let worker_id = spec.id.clone();
         let handle = tokio::spawn(async move {
-            run_worker(supervisor_name, worker_id, worker, control_tx).await;
+            run_worker(supervisor_name, worker_id, worker, control_tx, None).await;
+        });
+
+        Self {
+            spec,
+            handle: Some(handle),
+        }
+    }
+
+    /// Spawns a worker with linked initialization handshake
+    pub(crate) fn spawn_with_link<Cmd>(
+        spec: StatefulWorkerSpec<W>,
+        supervisor_name: String,
+        control_tx: mpsc::UnboundedSender<Cmd>,
+        init_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) -> Self
+    where
+        Cmd: From<WorkerTermination> + Send + 'static,
+    {
+        let worker = spec.create_worker();
+        let worker_id = spec.id.clone();
+        let handle = tokio::spawn(async move {
+            run_worker(
+                supervisor_name,
+                worker_id,
+                worker,
+                control_tx,
+                Some(init_tx),
+            )
+            .await;
         });
 
         Self {
@@ -343,6 +372,20 @@ pub enum StatefulSupervisorError {
     ChildAlreadyExists(String),
     /// Child with this ID not found
     ChildNotFound(String),
+    /// Child initialization failed
+    InitializationFailed {
+        /// ID of the child that failed to initialize
+        child_id: String,
+        /// Reason for initialization failure
+        reason: String,
+    },
+    /// Child initialization timed out
+    InitializationTimeout {
+        /// ID of the child that timed out
+        child_id: String,
+        /// Duration after which timeout occurred
+        timeout: std::time::Duration,
+    },
 }
 
 impl fmt::Display for StatefulSupervisorError {
@@ -379,6 +422,16 @@ impl fmt::Display for StatefulSupervisorError {
                     id
                 )
             }
+            StatefulSupervisorError::InitializationFailed { child_id, reason } => {
+                write!(f, "child '{}' initialization failed: {}", child_id, reason)
+            }
+            StatefulSupervisorError::InitializationTimeout { child_id, timeout } => {
+                write!(
+                    f,
+                    "child '{}' initialization timed out after {:?}",
+                    child_id, timeout
+                )
+            }
         }
     }
 }
@@ -393,6 +446,11 @@ impl std::error::Error for StatefulSupervisorError {}
 pub(crate) enum StatefulSupervisorCommand<W: Worker> {
     StartChild {
         spec: StatefulWorkerSpec<W>,
+        respond_to: oneshot::Sender<Result<ChildId, StatefulSupervisorError>>,
+    },
+    StartChildLinked {
+        spec: StatefulWorkerSpec<W>,
+        timeout: std::time::Duration,
         respond_to: oneshot::Sender<Result<ChildId, StatefulSupervisorError>>,
     },
     TerminateChild {
@@ -481,6 +539,14 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
                     let result = self.handle_start_child(spec).await;
                     let _ = respond_to.send(result);
                 }
+                StatefulSupervisorCommand::StartChildLinked {
+                    spec,
+                    timeout,
+                    respond_to,
+                } => {
+                    let result = self.handle_start_child_linked(spec, timeout).await;
+                    let _ = respond_to.send(result);
+                }
                 StatefulSupervisorCommand::TerminateChild { id, respond_to } => {
                     let result = self.handle_terminate_child(&id).await;
                     let _ = respond_to.send(result);
@@ -530,6 +596,78 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
         Ok(id)
     }
 
+    async fn handle_start_child_linked(
+        &mut self,
+        spec: StatefulWorkerSpec<W>,
+        timeout: std::time::Duration,
+    ) -> Result<ChildId, StatefulSupervisorError> {
+        // Check if child with same ID already exists
+        if self.children.iter().any(|c| c.id() == spec.id) {
+            return Err(StatefulSupervisorError::ChildAlreadyExists(spec.id.clone()));
+        }
+
+        let id = spec.id.clone();
+        let (init_tx, init_rx) = oneshot::channel();
+
+        let worker = StatefulWorkerProcess::spawn_with_link(
+            spec,
+            self.name.clone(),
+            self.control_tx.clone(),
+            init_tx,
+        );
+
+        // Wait for initialization with timeout
+        let init_result = tokio::time::timeout(timeout, init_rx).await;
+
+        match init_result {
+            Ok(Ok(Ok(()))) => {
+                // Initialization succeeded
+                self.children.push(StatefulChild::Worker(worker));
+                slog::debug!(slog_scope::logger(), "linked child started successfully";
+                    "supervisor" => &self.name,
+                    "child" => &id
+                );
+                Ok(id)
+            }
+            Ok(Ok(Err(reason))) => {
+                // Initialization failed - worker sent error
+                slog::error!(slog_scope::logger(), "linked child initialization failed";
+                    "supervisor" => &self.name,
+                    "child" => &id,
+                    "reason" => &reason
+                );
+                // Note: init failures do NOT trigger restart policies
+                Err(StatefulSupervisorError::InitializationFailed {
+                    child_id: id,
+                    reason,
+                })
+            }
+            Ok(Err(_)) => {
+                // Channel closed - worker panicked before sending result
+                slog::error!(slog_scope::logger(), "linked child panicked during initialization";
+                    "supervisor" => &self.name,
+                    "child" => &id
+                );
+                Err(StatefulSupervisorError::InitializationFailed {
+                    child_id: id,
+                    reason: "worker panicked during initialization".to_string(),
+                })
+            }
+            Err(_) => {
+                // Timeout
+                slog::error!(slog_scope::logger(), "linked child initialization timed out";
+                    "supervisor" => &self.name,
+                    "child" => &id,
+                    "timeout" => ?timeout
+                );
+                Err(StatefulSupervisorError::InitializationTimeout {
+                    child_id: id,
+                    timeout,
+                })
+            }
+        }
+    }
+
     async fn handle_terminate_child(&mut self, id: &str) -> Result<(), StatefulSupervisorError> {
         let position = self
             .children
@@ -568,7 +706,7 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
             "reason" => ?reason
         );
 
-        let position = match self.children.iter().position(|c| c.id() == &id) {
+        let position = match self.children.iter().position(|c| c.id() == id) {
             Some(pos) => pos,
             None => {
                 slog::warn!(slog_scope::logger(), "terminated child not found in list";
@@ -784,6 +922,54 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
         self.control_tx
             .send(StatefulSupervisorCommand::StartChild {
                 spec,
+                respond_to: result_tx,
+            })
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?;
+
+        result_rx
+            .await
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?
+    }
+
+    /// Dynamically starts a new child worker with linked initialization.
+    ///
+    /// This method waits for the worker's initialization to complete before returning.
+    /// If initialization fails or times out, an error is returned and the worker is not added.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for the child
+    /// * `factory` - Factory function to create the worker
+    /// * `restart_policy` - How to handle worker termination after it starts running
+    /// * `context` - Shared context for stateful workers
+    /// * `timeout` - Maximum time to wait for initialization
+    ///
+    /// # Errors
+    ///
+    /// * `StatefulSupervisorError::InitializationFailed` - Worker initialization returned an error
+    /// * `StatefulSupervisorError::InitializationTimeout` - Worker didn't initialize within timeout
+    /// * `StatefulSupervisorError::ChildAlreadyExists` - A child with this ID already exists
+    /// * `StatefulSupervisorError::ShuttingDown` - Supervisor is shutting down
+    ///
+    /// # Note
+    ///
+    /// Initialization failures do NOT trigger restart policies. The worker must successfully
+    /// initialize before restart policies take effect.
+    pub async fn start_child_linked(
+        &self,
+        id: impl Into<String>,
+        factory: impl Fn(Arc<WorkerContext>) -> W + Send + Sync + 'static,
+        restart_policy: RestartPolicy,
+        context: Arc<WorkerContext>,
+        timeout: std::time::Duration,
+    ) -> Result<ChildId, StatefulSupervisorError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        let spec = StatefulWorkerSpec::new(id, factory, restart_policy, context);
+
+        self.control_tx
+            .send(StatefulSupervisorCommand::StartChildLinked {
+                spec,
+                timeout,
                 respond_to: result_tx,
             })
             .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?;

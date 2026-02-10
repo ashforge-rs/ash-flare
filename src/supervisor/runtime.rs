@@ -16,6 +16,11 @@ pub(crate) enum SupervisorCommand<W: Worker> {
         spec: WorkerSpec<W>,
         respond_to: oneshot::Sender<Result<ChildId, SupervisorError>>,
     },
+    StartChildLinked {
+        spec: WorkerSpec<W>,
+        timeout: std::time::Duration,
+        respond_to: oneshot::Sender<Result<ChildId, SupervisorError>>,
+    },
     TerminateChild {
         id: ChildId,
         respond_to: oneshot::Sender<Result<(), SupervisorError>>,
@@ -99,6 +104,14 @@ impl<W: Worker> SupervisorRuntime<W> {
                     let result = self.handle_start_child(spec).await;
                     let _ = respond_to.send(result);
                 }
+                SupervisorCommand::StartChildLinked {
+                    spec,
+                    timeout,
+                    respond_to,
+                } => {
+                    let result = self.handle_start_child_linked(spec, timeout).await;
+                    let _ = respond_to.send(result);
+                }
                 SupervisorCommand::TerminateChild { id, respond_to } => {
                     let result = self.handle_terminate_child(&id).await;
                     let _ = respond_to.send(result);
@@ -148,6 +161,78 @@ impl<W: Worker> SupervisorRuntime<W> {
         Ok(id)
     }
 
+    async fn handle_start_child_linked(
+        &mut self,
+        spec: WorkerSpec<W>,
+        timeout: std::time::Duration,
+    ) -> Result<ChildId, SupervisorError> {
+        // Check if child with same ID already exists
+        if self.children.iter().any(|c| c.id() == spec.id) {
+            return Err(SupervisorError::ChildAlreadyExists(spec.id.clone()));
+        }
+
+        let id = spec.id.clone();
+        let (init_tx, init_rx) = oneshot::channel();
+
+        let worker = WorkerProcess::spawn_with_link(
+            spec,
+            self.name.clone(),
+            self.control_tx.clone(),
+            init_tx,
+        );
+
+        // Wait for initialization with timeout
+        let init_result = tokio::time::timeout(timeout, init_rx).await;
+
+        match init_result {
+            Ok(Ok(Ok(()))) => {
+                // Initialization succeeded
+                self.children.push(Child::Worker(worker));
+                slog::debug!(slog_scope::logger(), "linked child started successfully";
+                    "supervisor" => &self.name,
+                    "child" => &id
+                );
+                Ok(id)
+            }
+            Ok(Ok(Err(reason))) => {
+                // Initialization failed - worker sent error
+                slog::error!(slog_scope::logger(), "linked child initialization failed";
+                    "supervisor" => &self.name,
+                    "child" => &id,
+                    "reason" => &reason
+                );
+                // Note: init failures do NOT trigger restart policies
+                Err(SupervisorError::InitializationFailed {
+                    child_id: id,
+                    reason,
+                })
+            }
+            Ok(Err(_)) => {
+                // Channel closed - worker panicked before sending result
+                slog::error!(slog_scope::logger(), "linked child panicked during initialization";
+                    "supervisor" => &self.name,
+                    "child" => &id
+                );
+                Err(SupervisorError::InitializationFailed {
+                    child_id: id,
+                    reason: "worker panicked during initialization".to_string(),
+                })
+            }
+            Err(_) => {
+                // Timeout
+                slog::error!(slog_scope::logger(), "linked child initialization timed out";
+                    "supervisor" => &self.name,
+                    "child" => &id,
+                    "timeout" => ?timeout
+                );
+                Err(SupervisorError::InitializationTimeout {
+                    child_id: id,
+                    timeout,
+                })
+            }
+        }
+    }
+
     async fn handle_terminate_child(&mut self, id: &str) -> Result<(), SupervisorError> {
         let position = self
             .children
@@ -186,7 +271,7 @@ impl<W: Worker> SupervisorRuntime<W> {
             "reason" => ?reason
         );
 
-        let position = match self.children.iter().position(|c| c.id() == &id) {
+        let position = match self.children.iter().position(|c| c.id() == id) {
             Some(pos) => pos,
             None => {
                 slog::warn!(slog_scope::logger(), "terminated child not found in list";

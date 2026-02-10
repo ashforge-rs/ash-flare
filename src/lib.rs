@@ -13,6 +13,7 @@
 //! - **Generic Workers**: Trait-based worker system for any async workload
 //! - **Dynamic Management**: Add/remove children at runtime
 //! - **Structured Logging**: Built-in support for `slog` structured logging
+//! - **Mailbox System**: Optional message-passing for workers with string-based messages
 //!
 //! # Quick Start
 //!
@@ -84,6 +85,7 @@ mod types;
 mod worker;
 
 pub mod distributed;
+pub mod mailbox;
 pub mod supervisor_stateful;
 
 // Re-export public API
@@ -94,3 +96,6 @@ pub use supervisor_stateful::{
 };
 pub use types::{ChildExitReason, ChildId, ChildInfo, ChildType, WorkerContext};
 pub use worker::{Worker, WorkerError};
+
+// Re-export mailbox types
+pub use mailbox::{Mailbox, MailboxConfig, MailboxHandle, SendError, TryRecvError, TrySendError};

@@ -7,9 +7,10 @@ use std::time::{Duration, Instant};
 use bincode::{Decode, Encode};
 
 /// Restart strategy for supervisor children
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
 pub enum RestartStrategy {
     /// Restart only the failed child (`:one_for_one`)
+    #[default]
     OneForOne,
     /// Restart all children if any child fails (`:one_for_all`)
     OneForAll,
@@ -17,16 +18,13 @@ pub enum RestartStrategy {
     RestForOne,
 }
 
-impl Default for RestartStrategy {
-    fn default() -> Self {
-        Self::OneForOne
-    }
-}
+
 
 /// When to restart a child
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
 pub enum RestartPolicy {
     /// Always restart when child terminates (`:permanent`)
+    #[default]
     Permanent,
     /// Never restart (`:temporary`)
     Temporary,
@@ -34,11 +32,7 @@ pub enum RestartPolicy {
     Transient,
 }
 
-impl Default for RestartPolicy {
-    fn default() -> Self {
-        Self::Permanent
-    }
-}
+
 
 /// Restart intensity limits with max restarts within a time window
 #[derive(Debug, Clone, Copy)]

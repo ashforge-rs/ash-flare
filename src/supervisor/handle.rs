@@ -59,6 +59,52 @@ impl<W: Worker> SupervisorHandle<W> {
             .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?
     }
 
+    /// Dynamically starts a new child worker with linked initialization.
+    ///
+    /// This method waits for the worker's initialization to complete before returning.
+    /// If initialization fails or times out, an error is returned and the worker is not added.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for the child
+    /// * `factory` - Factory function to create the worker
+    /// * `restart_policy` - How to handle worker termination after it starts running
+    /// * `timeout` - Maximum time to wait for initialization
+    ///
+    /// # Errors
+    ///
+    /// * `SupervisorError::InitializationFailed` - Worker initialization returned an error
+    /// * `SupervisorError::InitializationTimeout` - Worker didn't initialize within timeout
+    /// * `SupervisorError::ChildAlreadyExists` - A child with this ID already exists
+    /// * `SupervisorError::ShuttingDown` - Supervisor is shutting down
+    ///
+    /// # Note
+    ///
+    /// Initialization failures do NOT trigger restart policies. The worker must successfully
+    /// initialize before restart policies take effect.
+    pub async fn start_child_linked(
+        &self,
+        id: impl Into<String>,
+        factory: impl Fn() -> W + Send + Sync + 'static,
+        restart_policy: RestartPolicy,
+        timeout: std::time::Duration,
+    ) -> Result<ChildId, SupervisorError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        let spec = WorkerSpec::new(id, factory, restart_policy);
+
+        self.control_tx
+            .send(SupervisorCommand::StartChildLinked {
+                spec,
+                timeout,
+                respond_to: result_tx,
+            })
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?;
+
+        result_rx
+            .await
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?
+    }
+
     /// Dynamically terminates a child
     pub async fn terminate_child(&self, id: &str) -> Result<(), SupervisorError> {
         let (result_tx, result_rx) = oneshot::channel();

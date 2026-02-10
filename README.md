@@ -14,6 +14,8 @@ Fault-tolerant supervision trees for Rust with distributed capabilities inspired
 - **⚡ Restart Policies**: `Permanent`, `Temporary`, and `Transient` restart behaviors
 - **📊 Restart Intensity**: Configurable restart limits with sliding time windows
 - **🗂️ Stateful Workers**: Optional shared in-memory KV store for workers (`StatefulSupervisorSpec`)
+- **🔗 Linked Startup**: Synchronous initialization with `start_child_linked` for reliable worker startup
+- **📬 Mailbox System**: Simple message-passing between workers
 - **🌐 Distributed**: Run supervisors across processes or machines via TCP/Unix sockets
 - **🔌 Generic Workers**: Trait-based worker system for any async workload
 - **🛠️ Dynamic Management**: Add/remove children at runtime
@@ -240,6 +242,90 @@ handle.terminate_child(&child_id).await.unwrap();
 let children = handle.which_children().await.unwrap();
 ```
 
+## Linked Child Startup
+
+Use `start_child_linked` to ensure workers initialize successfully before being added to the supervision tree:
+
+```rust
+use std::time::Duration;
+
+#[async_trait]
+impl Worker for DatabaseWorker {
+    type Error = std::io::Error;
+
+    async fn initialize(&mut self) -> Result<(), Self::Error> {
+        // Connect to database
+        self.connect_db().await?;
+        // Verify connection
+        self.ping().await?;
+        Ok(())
+    }
+
+    async fn run(&mut self) -> Result<(), Self::Error> {
+        // Main worker loop
+        loop {
+            // Process queries...
+        }
+    }
+}
+
+// Start worker with linked initialization
+match handle
+    .start_child_linked(
+        "db-worker",
+        || DatabaseWorker::new(),
+        RestartPolicy::Permanent,
+        Duration::from_secs(5),  // Initialization timeout
+    )
+    .await
+{
+    Ok(child_id) => println!("Worker {} started successfully", child_id),
+    Err(e) => println!("Worker failed to initialize: {}", e),
+}
+```
+
+**Key differences from `start_child`:**
+
+- Waits for `initialize()` to complete before returning
+- Returns error if initialization fails or times out
+- Failed initialization does NOT trigger restart policies
+- Worker is only added to the tree after successful initialization
+
+**Error types:**
+
+- `InitializationFailed` - Worker returned an error during initialization
+- `InitializationTimeout` - Worker didn't initialize within the timeout
+- `ChildAlreadyExists` - A child with this ID already exists
+
+## Mailbox System
+
+Workers can communicate using a simple mailbox system:
+
+```rust
+use ash_flare::{Worker, Mailbox, MailboxConfig, mailbox_named};
+
+struct MessageWorker {
+    id: usize,
+    mailbox: Mailbox,
+}
+
+// Use the convenience macro for mailbox workers
+ash_flare::impl_worker_mailbox! {
+    MessageWorker, std::io::Error => |self, msg| {
+        println!("[Worker {}] Received: {}", self.id, msg);
+    }
+}
+
+// Create workers with mailboxes
+let (handle1, mailbox1) = mailbox_named(MailboxConfig::default(), "worker-1");
+let (handle2, mailbox2) = mailbox_named(MailboxConfig::default(), "worker-2");
+
+// Workers can send messages to each other
+handle2.send("Hello from worker 1").await?;
+```
+
+See `examples/mailbox_p2p.rs` and `examples/mailbox_pool.rs` for complete examples.
+
 ## Distributed Supervision
 
 Run supervisors across processes or machines:
@@ -350,6 +436,10 @@ ERROR restart intensity exceeded, shutting down; supervisor: "root"
 Check the `examples/` directory for more:
 
 - `counter.rs` - Basic supervisor with multiple workers
+- `start_link_demo.rs` - Linked child startup with initialization handshake
+- `mailbox_p2p.rs` - Peer-to-peer worker communication with mailboxes
+- `mailbox_pool.rs` - Worker pool sharing a mailbox
+- `mailbox_macro.rs` - Using the mailbox worker macro
 - `distributed.rs` - Network-distributed supervisors
 - `super_tree.rs` - Complex nested supervision trees
 - `interactive_demo.rs` - Interactive supervisor management
@@ -358,6 +448,8 @@ Run an example:
 
 ```bash
 cargo run --example counter
+cargo run --example start_link_demo
+cargo run --example mailbox_p2p
 ```
 
 ## License

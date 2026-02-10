@@ -92,7 +92,36 @@ impl<W: Worker> WorkerProcess<W> {
         let worker = spec.create_worker();
         let worker_id = spec.id.clone();
         let handle = tokio::spawn(async move {
-            run_worker(supervisor_name, worker_id, worker, control_tx).await;
+            run_worker(supervisor_name, worker_id, worker, control_tx, None).await;
+        });
+
+        Self {
+            spec,
+            handle: Some(handle),
+        }
+    }
+
+    /// Spawns a worker with linked initialization handshake
+    pub(crate) fn spawn_with_link<Cmd>(
+        spec: WorkerSpec<W>,
+        supervisor_name: String,
+        control_tx: mpsc::UnboundedSender<Cmd>,
+        init_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) -> Self
+    where
+        Cmd: From<WorkerTermination> + Send + 'static,
+    {
+        let worker = spec.create_worker();
+        let worker_id = spec.id.clone();
+        let handle = tokio::spawn(async move {
+            run_worker(
+                supervisor_name,
+                worker_id,
+                worker,
+                control_tx,
+                Some(init_tx),
+            )
+            .await;
         });
 
         Self {

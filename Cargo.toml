@@ -97,6 +97,10 @@ name = "dynamic_workers"
 path = "examples/dynamic_workers.rs"
 
 [[example]]
+name = "start_link_demo"
+path = "examples/start_link_demo.rs"
+
+[[example]]
 name = "stateful_example"
 path = "examples/stateful_example.rs"
 
@@ -107,3 +111,15 @@ path = "examples/stateful_macro_demo.rs"
 [[example]]
 name = "large_tree"
 path = "examples/large_tree.rs"
+
+[[example]]
+name = "mailbox_pool"
+path = "examples/mailbox_pool.rs"
+
+[[example]]
+name = "mailbox_p2p"
+path = "examples/mailbox_p2p.rs"
+
+[[example]]
+name = "mailbox_macro"
+path = "examples/mailbox_macro.rs"
