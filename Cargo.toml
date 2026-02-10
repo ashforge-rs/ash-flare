@@ -30,7 +30,7 @@ slog-term = "2.9"
 slog-scope = "4.4"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 
 [[bench]]
 name = "supervision_benchmark"
