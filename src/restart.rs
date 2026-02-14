@@ -7,7 +7,19 @@ use std::time::{Duration, Instant};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 /// Restart strategy for supervisor children
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 #[rkyv(derive(Debug))]
 pub enum RestartStrategy {
     /// Restart only the failed child (`:one_for_one`)
@@ -19,10 +31,20 @@ pub enum RestartStrategy {
     RestForOne,
 }
 
-
-
 /// When to restart a child
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 #[rkyv(derive(Debug))]
 pub enum RestartPolicy {
     /// Always restart when child terminates (`:permanent`)
@@ -33,8 +55,6 @@ pub enum RestartPolicy {
     /// Restart only if abnormal termination (`:transient`)
     Transient,
 }
-
-
 
 /// Restart intensity limits with max restarts within a time window
 #[derive(Debug, Clone, Copy)]

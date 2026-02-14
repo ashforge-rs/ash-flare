@@ -309,7 +309,13 @@ async fn send_message<S, T>(stream: &mut S, msg: &T) -> Result<(), DistributedEr
 where
     S: AsyncWriteExt + Unpin,
     T: Serialize,
-    for<'a> T: RkyvSerialize<rkyv::api::high::HighSerializer<rkyv::util::AlignedVec, rkyv::ser::allocator::ArenaHandle<'a>, rkyv::rancor::Error>>,
+    for<'a> T: RkyvSerialize<
+        rkyv::api::high::HighSerializer<
+            rkyv::util::AlignedVec,
+            rkyv::ser::allocator::ArenaHandle<'a>,
+            rkyv::rancor::Error,
+        >,
+    >,
 {
     let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(msg)?;
     let len = encoded.len() as u32;
