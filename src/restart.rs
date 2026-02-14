@@ -4,10 +4,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use bincode::{Decode, Encode};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 /// Restart strategy for supervisor children
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+#[rkyv(derive(Debug))]
 pub enum RestartStrategy {
     /// Restart only the failed child (`:one_for_one`)
     #[default]
@@ -18,10 +31,21 @@ pub enum RestartStrategy {
     RestForOne,
 }
 
-
-
 /// When to restart a child
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+#[rkyv(derive(Debug))]
 pub enum RestartPolicy {
     /// Always restart when child terminates (`:permanent`)
     #[default]
@@ -31,8 +55,6 @@ pub enum RestartPolicy {
     /// Restart only if abnormal termination (`:transient`)
     Transient,
 }
-
-
 
 /// Restart intensity limits with max restarts within a time window
 #[derive(Debug, Clone, Copy)]

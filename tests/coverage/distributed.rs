@@ -300,18 +300,18 @@ async fn test_remote_supervisor_handle_connect_unix() {
 }
 
 // ============================================================================
-// Serialization Tests (require bincode/serde traits to work)
+// Serialization Tests (require rkyv/serde traits to work)
 // ============================================================================
 
 #[test]
 fn test_supervisor_address_serialize() {
     let addr = SupervisorAddress::Tcp("test:8080".to_string());
-    let encoded = bincode::encode_to_vec(&addr, bincode::config::standard());
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&addr);
     assert!(encoded.is_ok());
 
     if let Ok(bytes) = encoded {
-        let decoded: Result<(SupervisorAddress, _), _> =
-            bincode::decode_from_slice(&bytes, bincode::config::standard());
+        let decoded: Result<SupervisorAddress, _> =
+            unsafe { rkyv::from_bytes_unchecked::<SupervisorAddress, rkyv::rancor::Error>(&bytes) };
         assert!(decoded.is_ok());
     }
 }
@@ -319,12 +319,12 @@ fn test_supervisor_address_serialize() {
 #[test]
 fn test_remote_command_serialize() {
     let cmd = RemoteCommand::WhichChildren;
-    let encoded = bincode::encode_to_vec(&cmd, bincode::config::standard());
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&cmd);
     assert!(encoded.is_ok());
 
     if let Ok(bytes) = encoded {
-        let decoded: Result<(RemoteCommand, _), _> =
-            bincode::decode_from_slice(&bytes, bincode::config::standard());
+        let decoded: Result<RemoteCommand, _> =
+            unsafe { rkyv::from_bytes_unchecked::<RemoteCommand, rkyv::rancor::Error>(&bytes) };
         assert!(decoded.is_ok());
     }
 }
@@ -332,12 +332,12 @@ fn test_remote_command_serialize() {
 #[test]
 fn test_remote_response_serialize() {
     let resp = RemoteResponse::Ok;
-    let encoded = bincode::encode_to_vec(&resp, bincode::config::standard());
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&resp);
     assert!(encoded.is_ok());
 
     if let Ok(bytes) = encoded {
-        let decoded: Result<(RemoteResponse, _), _> =
-            bincode::decode_from_slice(&bytes, bincode::config::standard());
+        let decoded: Result<RemoteResponse, _> =
+            unsafe { rkyv::from_bytes_unchecked::<RemoteResponse, rkyv::rancor::Error>(&bytes) };
         assert!(decoded.is_ok());
     }
 }
@@ -349,12 +349,12 @@ fn test_child_info_serialize() {
         child_type: ChildType::Worker,
         restart_policy: Some(RestartPolicy::Permanent),
     };
-    let encoded = bincode::encode_to_vec(&info, bincode::config::standard());
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&info);
     assert!(encoded.is_ok());
 
     if let Ok(bytes) = encoded {
-        let decoded: Result<(ChildInfo, _), _> =
-            bincode::decode_from_slice(&bytes, bincode::config::standard());
+        let decoded: Result<ChildInfo, _> =
+            unsafe { rkyv::from_bytes_unchecked::<ChildInfo, rkyv::rancor::Error>(&bytes) };
         assert!(decoded.is_ok());
     }
 }
@@ -367,12 +367,12 @@ fn test_supervisor_status_serialize() {
         restart_strategy: "OneForOne".to_string(),
         uptime_secs: 100,
     };
-    let encoded = bincode::encode_to_vec(&status, bincode::config::standard());
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&status);
     assert!(encoded.is_ok());
 
     if let Ok(bytes) = encoded {
-        let decoded: Result<(SupervisorStatus, _), _> =
-            bincode::decode_from_slice(&bytes, bincode::config::standard());
+        let decoded: Result<SupervisorStatus, _> =
+            unsafe { rkyv::from_bytes_unchecked::<SupervisorStatus, rkyv::rancor::Error>(&bytes) };
         assert!(decoded.is_ok());
     }
 }

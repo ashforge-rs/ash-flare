@@ -2,14 +2,14 @@
 name = "ash-flare"
 version = "1.1.0"
 edition = "2024"
-authors = ["gntem"]
+authors = ["Giorgos Ntemiris <ntemirisgiorgos3@gmail.com>"]
 autoexamples = false
 exclude = ["*.sh", "*.cast", "architecture.md"]
-license = "MIT"
+license = "Apache-2.0"
 description = "Fault-tolerant supervision trees for Rust with distributed capabilities inspired by Erlang/OTP"
 documentation = "https://docs.rs/ash-flare"
-homepage = "https://github.com/gntem/ash-flare"
-repository = "https://github.com/gntem/ash-flare"
+homepage = "https://github.com/ashforge-rs/ash-flare"
+repository = "https://github.com/ashforge-rs/ash-flare"
 readme = "README.md"
 keywords = ["supervisor", "fault-tolerance", "resilience", "distributed"]
 categories = ["asynchronous", "concurrency"]
@@ -19,7 +19,7 @@ rust-version = "1.85"
 tokio = { version = "1.42", features = ["full"] }
 async-trait = "0.1"
 thiserror = "2.0"
-bincode = "2.0"
+rkyv = { version = "0.8", features = ["alloc"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dashmap = "6.1"
@@ -28,6 +28,7 @@ slog = "2.7"
 slog-async = "2.8"
 slog-term = "2.9"
 slog-scope = "4.4"
+time = "0.3.47"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }

@@ -58,7 +58,7 @@
 //! # async fn main() {
 //! let spec = StatefulSupervisorSpec::new("counter-supervisor")
 //!     .with_worker("counter-1", |ctx| CounterWorker {
-//!         id: "counter-1".to_string(),
+//!         id: "counter-1".to_owned(),
 //!         context: ctx
 //!     }, ash_flare::RestartPolicy::Permanent);
 //!
@@ -125,7 +125,7 @@ impl<W: Worker> fmt::Debug for StatefulWorkerSpec<W> {
         f.debug_struct("StatefulWorkerSpec")
             .field("id", &self.id)
             .field("restart_policy", &self.restart_policy)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -192,7 +192,8 @@ impl<W: Worker> StatefulWorkerProcess<W> {
     pub(crate) async fn stop(&mut self) {
         if let Some(handle) = self.handle.take() {
             handle.abort();
-            let _ = handle.await;
+            // Ignoring result as handle may have already completed
+            drop(handle.await);
         }
     }
 }
@@ -423,7 +424,7 @@ impl fmt::Display for StatefulSupervisorError {
                 )
             }
             StatefulSupervisorError::InitializationFailed { child_id, reason } => {
-                write!(f, "child '{}' initialization failed: {}", child_id, reason)
+                write!(f, "child '{child_id}' initialization failed: {reason}")
             }
             StatefulSupervisorError::InitializationTimeout { child_id, timeout } => {
                 write!(
@@ -650,7 +651,7 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
                 );
                 Err(StatefulSupervisorError::InitializationFailed {
                     child_id: id,
-                    reason: "worker panicked during initialization".to_string(),
+                    reason: "worker panicked during initialization".to_owned(),
                 })
             }
             Err(_) => {
@@ -673,7 +674,7 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
             .children
             .iter()
             .position(|c| c.id() == id)
-            .ok_or_else(|| StatefulSupervisorError::ChildNotFound(id.to_string()))?;
+            .ok_or_else(|| StatefulSupervisorError::ChildNotFound(id.to_owned()))?;
 
         let mut child = self.children.remove(position);
         child.shutdown().await;
@@ -690,7 +691,7 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
             .children
             .iter()
             .map(|child| ChildInfo {
-                id: child.id().to_string(),
+                id: child.id().to_owned(),
                 child_type: child.child_type(),
                 restart_policy: child.restart_policy(),
             })
@@ -865,7 +866,7 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
 
     async fn shutdown_children(&mut self) {
         for child in self.children.drain(..) {
-            let id = child.id().to_string();
+            let id = child.id().to_owned();
             let mut child = child;
             child.shutdown().await;
             slog::debug!(slog_scope::logger(), "shut down child";
@@ -924,11 +925,11 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
                 spec,
                 respond_to: result_tx,
             })
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))?;
 
         result_rx
             .await
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))?
     }
 
     /// Dynamically starts a new child worker with linked initialization.
@@ -972,11 +973,11 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
                 timeout,
                 respond_to: result_tx,
             })
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))?;
 
         result_rx
             .await
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))?
     }
 
     /// Dynamically terminates a child
@@ -985,14 +986,14 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
 
         self.control_tx
             .send(StatefulSupervisorCommand::TerminateChild {
-                id: id.to_string(),
+                id: id.to_owned(),
                 respond_to: result_tx,
             })
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))?;
 
         result_rx
             .await
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))?
     }
 
     /// Returns information about all children
@@ -1003,18 +1004,18 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
             .send(StatefulSupervisorCommand::WhichChildren {
                 respond_to: result_tx,
             })
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))?;
 
         result_rx
             .await
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))?
     }
 
     /// Requests a graceful shutdown of the supervisor tree.
     pub async fn shutdown(&self) -> Result<(), StatefulSupervisorError> {
         self.control_tx
             .send(StatefulSupervisorCommand::Shutdown)
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))?;
         Ok(())
     }
 
@@ -1031,11 +1032,11 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
             .send(StatefulSupervisorCommand::GetRestartStrategy {
                 respond_to: result_tx,
             })
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))?;
 
         result_rx
             .await
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))
     }
 
     /// Returns the supervisor's uptime in seconds.
@@ -1046,10 +1047,10 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
             .send(StatefulSupervisorCommand::GetUptime {
                 respond_to: result_tx,
             })
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))?;
 
         result_rx
             .await
-            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_string()))
+            .map_err(|_| StatefulSupervisorError::ShuttingDown(self.name().to_owned()))
     }
 }
