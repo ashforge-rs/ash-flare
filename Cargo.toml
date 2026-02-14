@@ -28,6 +28,7 @@ slog = "2.7"
 slog-async = "2.8"
 slog-term = "2.9"
 slog-scope = "4.4"
+time = "0.3.47"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
