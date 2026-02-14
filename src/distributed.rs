@@ -1,9 +1,11 @@
 //! Distributed supervision via TCP/Unix sockets
 //!
 //! Allows supervisors to run in separate processes (local) or on remote machines (network).
-//! Commands are serialized with bincode for minimal overhead.
+//! Commands are serialized with rkyv for minimal overhead.
 
-use bincode::{Decode, Encode};
+#![allow(missing_docs)]
+
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -16,7 +18,8 @@ use tokio::net::{UnixListener, UnixStream};
 use crate::{ChildInfo as SupervisorChildInfo, ChildType, RestartPolicy, SupervisorHandle, Worker};
 
 /// Remote supervisor address
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub enum SupervisorAddress {
     /// TCP socket address (host:port)
     Tcp(String),
@@ -25,7 +28,10 @@ pub enum SupervisorAddress {
 }
 
 /// Commands that can be sent to a remote supervisor
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
+#[rkyv(attr(allow(missing_docs)))]
 pub enum RemoteCommand {
     /// Request supervisor to shut down gracefully
     Shutdown,
@@ -41,7 +47,10 @@ pub enum RemoteCommand {
 }
 
 /// Responses from remote supervisor
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
+#[rkyv(attr(allow(missing_docs)))]
 pub enum RemoteResponse {
     /// Command executed successfully
     Ok,
@@ -54,7 +63,10 @@ pub enum RemoteResponse {
 }
 
 /// Information about a child process (simplified for serialization)
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
+#[rkyv(attr(allow(missing_docs)))]
 pub struct ChildInfo {
     /// Unique identifier for the child
     pub id: String,
@@ -75,7 +87,10 @@ impl From<SupervisorChildInfo> for ChildInfo {
 }
 
 /// Status information about a supervisor
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
+#[rkyv(attr(allow(missing_docs)))]
 pub struct SupervisorStatus {
     /// Name of the supervisor
     pub name: String,
@@ -153,7 +168,7 @@ impl RemoteSupervisorHandle {
     /// Terminate a child on the remote supervisor
     pub async fn terminate_child(&self, id: &str) -> Result<(), DistributedError> {
         match self
-            .send_command(RemoteCommand::TerminateChild { id: id.to_string() })
+            .send_command(RemoteCommand::TerminateChild { id: id.to_owned() })
             .await?
         {
             RemoteResponse::Ok => Ok(()),
@@ -275,11 +290,11 @@ impl<W: Worker> SupervisorServer<W> {
                     .restart_strategy()
                     .await
                     .map(|s| format!("{:?}", s))
-                    .unwrap_or_else(|_| "Unknown".to_string());
+                    .unwrap_or_else(|_| "Unknown".to_owned());
                 let uptime_secs = handle.uptime().await.unwrap_or(0);
 
                 RemoteResponse::Status(SupervisorStatus {
-                    name: handle.name().to_string(),
+                    name: handle.name().to_owned(),
                     children_count: handle.which_children().await.map(|c| c.len()).unwrap_or(0),
                     restart_strategy,
                     uptime_secs,
@@ -289,13 +304,14 @@ impl<W: Worker> SupervisorServer<W> {
     }
 }
 
-/// Send a message over a stream (length-prefixed bincode)
+/// Send a message over a stream (length-prefixed rkyv)
 async fn send_message<S, T>(stream: &mut S, msg: &T) -> Result<(), DistributedError>
 where
     S: AsyncWriteExt + Unpin,
-    T: Serialize + Encode,
+    T: Serialize,
+    for<'a> T: RkyvSerialize<rkyv::api::high::HighSerializer<rkyv::util::AlignedVec, rkyv::ser::allocator::ArenaHandle<'a>, rkyv::rancor::Error>>,
 {
-    let encoded = bincode::encode_to_vec(msg, bincode::config::standard())?;
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(msg)?;
     let len = encoded.len() as u32;
 
     stream.write_all(&len.to_be_bytes()).await?;
@@ -305,11 +321,12 @@ where
     Ok(())
 }
 
-/// Receive a message from a stream (length-prefixed bincode)
+/// Receive a message from a stream (length-prefixed rkyv)
 async fn receive_message<S, T>(stream: &mut S) -> Result<T, DistributedError>
 where
     S: AsyncReadExt + Unpin,
-    T: for<'de> Deserialize<'de> + bincode::Decode<()>,
+    T: Archive,
+    for<'a> T::Archived: RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
 {
     let mut len_bytes = [0u8; 4];
     stream.read_exact(&mut len_bytes).await?;
@@ -322,7 +339,8 @@ where
     let mut buffer = vec![0u8; len];
     stream.read_exact(&mut buffer).await?;
 
-    let (decoded, _) = bincode::decode_from_slice(&buffer, bincode::config::standard())?;
+    // SAFETY: The buffer contains serialized rkyv data from a trusted source (our own code)
+    let decoded: T = unsafe { rkyv::from_bytes_unchecked::<T, rkyv::rancor::Error>(&buffer)? };
     Ok(decoded)
 }
 
@@ -332,9 +350,9 @@ pub enum DistributedError {
     /// I/O error occurred
     Io(std::io::Error),
     /// Serialization error
-    Encode(bincode::error::EncodeError),
+    Encode(rkyv::rancor::Error),
     /// Deserialization error
-    Decode(bincode::error::DecodeError),
+    Decode(rkyv::rancor::Error),
     /// Error from remote supervisor
     RemoteError(String),
     /// Received unexpected response type
@@ -366,14 +384,8 @@ impl From<std::io::Error> for DistributedError {
     }
 }
 
-impl From<bincode::error::EncodeError> for DistributedError {
-    fn from(e: bincode::error::EncodeError) -> Self {
+impl From<rkyv::rancor::Error> for DistributedError {
+    fn from(e: rkyv::rancor::Error) -> Self {
         DistributedError::Encode(e)
-    }
-}
-
-impl From<bincode::error::DecodeError> for DistributedError {
-    fn from(e: bincode::error::DecodeError) -> Self {
-        DistributedError::Decode(e)
     }
 }

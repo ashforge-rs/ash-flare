@@ -52,11 +52,11 @@ impl<W: Worker> SupervisorHandle<W> {
                 spec,
                 respond_to: result_tx,
             })
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
 
         result_rx
             .await
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?
     }
 
     /// Dynamically starts a new child worker with linked initialization.
@@ -98,11 +98,11 @@ impl<W: Worker> SupervisorHandle<W> {
                 timeout,
                 respond_to: result_tx,
             })
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
 
         result_rx
             .await
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?
     }
 
     /// Dynamically terminates a child
@@ -111,14 +111,14 @@ impl<W: Worker> SupervisorHandle<W> {
 
         self.control_tx
             .send(SupervisorCommand::TerminateChild {
-                id: id.to_string(),
+                id: id.to_owned(),
                 respond_to: result_tx,
             })
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
 
         result_rx
             .await
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?
     }
 
     /// Returns information about all children
@@ -129,18 +129,18 @@ impl<W: Worker> SupervisorHandle<W> {
             .send(SupervisorCommand::WhichChildren {
                 respond_to: result_tx,
             })
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
 
         result_rx
             .await
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?
     }
 
     /// Requests a graceful shutdown of the supervisor tree.
     pub async fn shutdown(&self) -> Result<(), SupervisorError> {
         self.control_tx
             .send(SupervisorCommand::Shutdown)
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
         Ok(())
     }
 
@@ -159,11 +159,11 @@ impl<W: Worker> SupervisorHandle<W> {
             .send(SupervisorCommand::GetRestartStrategy {
                 respond_to: result_tx,
             })
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
 
         result_rx
             .await
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))
     }
 
     /// Returns the supervisor's uptime in seconds.
@@ -174,10 +174,10 @@ impl<W: Worker> SupervisorHandle<W> {
             .send(SupervisorCommand::GetUptime {
                 respond_to: result_tx,
             })
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))?;
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
 
         result_rx
             .await
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_string()))
+            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))
     }
 }

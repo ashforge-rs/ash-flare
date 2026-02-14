@@ -2,4 +2,5 @@
 
 # Shell scripts and recordings
 *.sh
+!lint.sh
 *.cast

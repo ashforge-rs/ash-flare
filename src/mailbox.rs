@@ -30,6 +30,7 @@ impl MailboxConfig {
     }
 
     /// Create bounded mailbox configuration
+    #[must_use]
     pub fn bounded(capacity: usize) -> Self {
         assert!(capacity > 0, "mailbox capacity must be > 0");
         Self::Bounded { capacity }
@@ -76,8 +77,12 @@ impl MailboxHandle {
     }
 
     /// Send a message to the worker (async, waits if mailbox full)
-    pub async fn send(&self, msg: impl Into<String>) -> Result<(), SendError> {
-        let msg = msg.into();
+    ///
+    /// # Errors
+    ///
+    /// Returns `SendError::Closed` if the receiver has been dropped.
+    pub async fn send(&self, message: impl Into<String>) -> Result<(), SendError> {
+        let msg = message.into();
         match &self.tx {
             MailboxSender::Bounded(tx) => tx
                 .send(msg)
@@ -90,8 +95,12 @@ impl MailboxHandle {
     }
 
     /// Try to send a message without blocking
-    pub fn try_send(&self, msg: impl Into<String>) -> Result<(), TrySendError> {
-        let msg = msg.into();
+    ///
+    /// # Errors
+    ///
+    /// Returns `TrySendError::Full` if the mailbox is full or `TrySendError::Closed` if the receiver has been dropped.
+    pub fn try_send(&self, message: impl Into<String>) -> Result<(), TrySendError> {
+        let msg = message.into();
         match &self.tx {
             MailboxSender::Bounded(tx) => tx.try_send(msg).map_err(|e| match e {
                 mpsc::error::TrySendError::Full(_) => TrySendError::Full,
@@ -106,11 +115,13 @@ impl MailboxHandle {
     }
 
     /// Get the worker ID
+    #[must_use]
     pub fn worker_id(&self) -> &str {
         &self.worker_id
     }
 
     /// Check if the mailbox is still open
+    #[must_use]
     pub fn is_open(&self) -> bool {
         match &self.tx {
             MailboxSender::Bounded(tx) => !tx.is_closed(),
@@ -151,6 +162,10 @@ impl Mailbox {
     }
 
     /// Try to receive a message without blocking
+    ///
+    /// # Errors
+    ///
+    /// Returns `TryRecvError::Empty` if no messages available or `TryRecvError::Disconnected` if all senders dropped.
     pub fn try_recv(&mut self) -> Result<String, TryRecvError> {
         match &mut self.rx {
             MailboxReceiver::Bounded(rx) => rx.try_recv().map_err(|e| match e {
@@ -166,6 +181,7 @@ impl Mailbox {
 }
 
 /// Create a mailbox channel
+#[must_use]
 pub fn mailbox(config: MailboxConfig) -> (MailboxHandle, Mailbox) {
     match config {
         MailboxConfig::Unbounded => {
@@ -188,9 +204,9 @@ pub fn mailbox(config: MailboxConfig) -> (MailboxHandle, Mailbox) {
 /// Create a mailbox channel with named worker
 pub fn mailbox_named(
     config: MailboxConfig,
-    worker_id: impl Into<String>,
+    worker_id_input: impl Into<String>,
 ) -> (MailboxHandle, Mailbox) {
-    let worker_id = worker_id.into();
+    let worker_id = worker_id_input.into();
     match config {
         MailboxConfig::Unbounded => {
             let (tx, rx) = mpsc::unbounded_channel();

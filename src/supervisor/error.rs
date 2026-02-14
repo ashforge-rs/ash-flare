@@ -3,7 +3,7 @@
 use std::fmt;
 
 /// Errors returned by supervisor operations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SupervisorError {
     /// Supervisor has no children
     NoChildren(String),

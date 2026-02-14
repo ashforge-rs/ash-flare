@@ -215,7 +215,7 @@ impl<W: Worker> SupervisorRuntime<W> {
                 );
                 Err(SupervisorError::InitializationFailed {
                     child_id: id,
-                    reason: "worker panicked during initialization".to_string(),
+                    reason: "worker panicked during initialization".to_owned(),
                 })
             }
             Err(_) => {
@@ -238,7 +238,7 @@ impl<W: Worker> SupervisorRuntime<W> {
             .children
             .iter()
             .position(|c| c.id() == id)
-            .ok_or_else(|| SupervisorError::ChildNotFound(id.to_string()))?;
+            .ok_or_else(|| SupervisorError::ChildNotFound(id.to_owned()))?;
 
         let mut child = self.children.remove(position);
         child.shutdown().await;
@@ -255,7 +255,7 @@ impl<W: Worker> SupervisorRuntime<W> {
             .children
             .iter()
             .map(|child| ChildInfo {
-                id: child.id().to_string(),
+                id: child.id().to_owned(),
                 child_type: child.child_type(),
                 restart_policy: child.restart_policy(),
             })
@@ -419,7 +419,7 @@ impl<W: Worker> SupervisorRuntime<W> {
 
     async fn shutdown_children(&mut self) {
         for child in self.children.drain(..) {
-            let id = child.id().to_string();
+            let id = child.id().to_owned();
             let mut child = child;
             child.shutdown().await;
             slog::debug!(slog_scope::logger(), "shut down child";

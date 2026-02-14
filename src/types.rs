@@ -3,12 +3,13 @@
 use crate::restart::RestartPolicy;
 use serde::{Deserialize, Serialize};
 
-use bincode::{Decode, Encode};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use dashmap::DashMap;
 use std::sync::Arc;
 
 /// Result of a worker's execution
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub enum ChildExitReason {
     /// Normal termination
     Normal,
@@ -33,7 +34,8 @@ pub struct ChildInfo {
 }
 
 /// Type of child in supervision tree
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
 pub enum ChildType {
     /// A worker process
     Worker,
@@ -162,7 +164,7 @@ impl WorkerContext {
     where
         F: FnOnce(Option<serde_json::Value>) -> Option<serde_json::Value>,
     {
-        match self.store.entry(key.to_string()) {
+        match self.store.entry(key.to_owned()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 let old_value = entry.get().clone();
                 match f(Some(old_value)) {
