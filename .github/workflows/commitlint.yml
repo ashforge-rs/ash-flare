@@ -25,6 +25,9 @@ jobs:
       - name: Install commitlint
         run: npm install --save-dev @commitlint/cli@latest @commitlint/config-conventional@latest
       
+      - name: Create commitlint config
+        run: 'echo "module.exports = { extends: [''@commitlint/config-conventional''] };" > commitlint.config.js'
+      
       - name: Validate PR title
         id: commitlint
         continue-on-error: true
