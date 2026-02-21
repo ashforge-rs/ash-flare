@@ -103,6 +103,7 @@ pub struct SupervisorStatus {
 }
 
 /// Handle to communicate with a remote supervisor
+#[derive(Clone)]
 pub struct RemoteSupervisorHandle {
     address: SupervisorAddress,
 }
@@ -210,9 +211,7 @@ impl<W: Worker> SupervisorServer<W> {
         let _ = std::fs::remove_file(path); // Clean up old socket
 
         let listener = UnixListener::bind(path)?;
-        slog::info!(slog_scope::logger(), "server listening on unix socket";
-            "path" => %path.display()
-        );
+        tracing::info!(path = %path.display(), "server listening on unix socket");
 
         loop {
             let (mut stream, _) = listener.accept().await?;
@@ -220,9 +219,7 @@ impl<W: Worker> SupervisorServer<W> {
 
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_connection(&mut stream, handle).await {
-                    slog::error!(slog_scope::logger(), "connection error";
-                        "error" => %e
-                    );
+                    tracing::error!(error = %e, "connection error");
                 }
             });
         }
@@ -231,22 +228,19 @@ impl<W: Worker> SupervisorServer<W> {
     /// Start listening on a TCP socket
     pub async fn listen_tcp(self, addr: impl AsRef<str>) -> Result<(), DistributedError> {
         let listener = TcpListener::bind(addr.as_ref()).await?;
-        slog::info!(slog_scope::logger(), "server listening on tcp";
-            "address" => addr.as_ref()
+        tracing::info!(
+            address = addr.as_ref(),
+            "server listening on tcp"
         );
 
         loop {
             let (mut stream, peer) = listener.accept().await?;
-            slog::debug!(slog_scope::logger(), "new connection";
-                "peer" => ?peer
-            );
+            tracing::debug!(peer = ?peer, "new connection");
             let handle = Arc::clone(&self.handle);
 
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_connection(&mut stream, handle).await {
-                    slog::error!(slog_scope::logger(), "Connection error";
-                        "error" => %e
-                    );
+                    tracing::error!(error = %e, "Connection error");
                 }
             });
         }

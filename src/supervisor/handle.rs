@@ -26,9 +26,7 @@ impl<W: Worker> SupervisorHandle<W> {
         let runtime_name = Arc::clone(&name_arc);
         tokio::spawn(async move {
             runtime.run().await;
-            slog::debug!(slog_scope::logger(), "supervisor stopped";
-                "name" => &*runtime_name
-            );
+            tracing::debug!(name = %*runtime_name, "supervisor stopped");
         });
 
         Self {

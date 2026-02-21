@@ -31,9 +31,10 @@ pub(crate) async fn run_worker<W: Worker, Cmd>(
             }
         }
         Err(err) => {
-            slog::error!(slog_scope::logger(), "worker initialization failed";
-                "worker" => &qualified_name,
-                "error" => %err
+            tracing::error!(
+                worker = %qualified_name,
+                error = %err,
+                "worker initialization failed"
             );
             // Send initialization failure if linked
             if let Some(tx) = init_tx {
@@ -50,18 +51,19 @@ pub(crate) async fn run_worker<W: Worker, Cmd>(
         }
     }
 
-    slog::debug!(slog_scope::logger(), "worker started"; "worker" => &qualified_name);
+    tracing::debug!(worker = %qualified_name, "worker started");
 
     // Run the worker's main loop
     let exit_reason = match worker.run().await {
         Ok(()) => {
-            slog::debug!(slog_scope::logger(), "worker completed normally"; "worker" => &qualified_name);
+            tracing::debug!(worker = %qualified_name, "worker completed normally");
             ChildExitReason::Normal
         }
         Err(err) => {
-            slog::warn!(slog_scope::logger(), "worker failed";
-                "worker" => &qualified_name,
-                "error" => %err
+            tracing::warn!(
+                worker = %qualified_name,
+                error = %err,
+                "worker failed"
             );
             ChildExitReason::Abnormal
         }
@@ -69,13 +71,14 @@ pub(crate) async fn run_worker<W: Worker, Cmd>(
 
     // Shutdown the worker
     if let Err(err) = worker.shutdown().await {
-        slog::error!(slog_scope::logger(), "worker shutdown failed";
-            "worker" => &qualified_name,
-            "error" => %err
+        tracing::error!(
+            worker = %qualified_name,
+            error = %err,
+            "worker shutdown failed"
         );
     }
 
-    slog::debug!(slog_scope::logger(), "worker stopped"; "worker" => &qualified_name);
+    tracing::debug!(worker = %qualified_name, "worker stopped");
 
     // Notify supervisor of termination
     let _ = control_tx.send(

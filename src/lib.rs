@@ -12,7 +12,7 @@
 //! - **Distributed**: Run supervisors across processes or machines via TCP/Unix sockets
 //! - **Generic Workers**: Trait-based worker system for any async workload
 //! - **Dynamic Management**: Add/remove children at runtime
-//! - **Structured Logging**: Built-in support for `slog` structured logging
+//! - **Structured Logging**: Built-in support for `tracing` structured logging
 //! - **Mailbox System**: Optional message-passing for workers with string-based messages
 //!
 //! # Quick Start
@@ -87,6 +87,9 @@ mod worker;
 pub mod distributed;
 pub mod mailbox;
 pub mod supervisor_stateful;
+
+// Python bindings module
+pub mod python;
 
 // Re-export public API
 pub use restart::{RestartIntensity, RestartPolicy, RestartStrategy};

@@ -1,8 +1,12 @@
 .PHONY: help publish check test clean tag release release-patch release-minor release-major \
-        dry-run pre-commit fmt lint doc build
+        dry-run pre-commit fmt lint doc build python-venv python-build python-install \
+        python-dev python-clean python-test
 
 # Extract version from Cargo.toml
 CURRENT_VERSION := $(shell grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+VENV_DIR := .venv
+PYTHON := $(VENV_DIR)/bin/python
+UV := uv
 
 help:
 	@echo "Available targets:"
@@ -17,6 +21,14 @@ help:
 	@echo "  doc              - Build documentation"
 	@echo "  doc-test         - Run documentation tests"
 	@echo "  clean            - Clean build artifacts"
+	@echo ""
+	@echo "Python Bindings (using UV):"
+	@echo "  python-venv      - Create Python virtual environment with UV"
+	@echo "  python-build     - Build Python extension with maturin"
+	@echo "  python-install   - Build and install into venv"
+	@echo "  python-dev       - Build in development mode (editable install)"
+	@echo "  python-clean     - Clean Python build artifacts"
+	@echo "  python-test      - Test Python bindings"
 	@echo ""
 	@echo "Release Management:"
 	@echo "  release-patch    - Bump patch version and release (e.g., 1.0.4 -> 1.0.5)"
@@ -166,3 +178,56 @@ release-major:
 	NEW_VERSION="$$NEW_MAJOR.0.0"; \
 	$(MAKE) release VERSION=$$NEW_VERSION
 
+# Python bindings targets
+python-venv:
+	@echo "Creating Python virtual environment with UV..."
+	@if ! command -v uv > /dev/null 2>&1; then \
+		echo "Error: UV is not installed. Please install UV first:"; \
+		echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"; \
+		exit 1; \
+	fi
+	@$(UV) venv $(VENV_DIR)
+	@echo "✓ Virtual environment created at $(VENV_DIR)"
+	@echo "Installing maturin..."
+	@$(UV) pip install --python $(VENV_DIR) maturin
+	@echo "✓ Maturin installed"
+
+python-build: python-venv
+	@echo "Building Python extension with maturin..."
+	@$(VENV_DIR)/bin/maturin build --release --features python
+	@echo "✓ Python extension built"
+
+python-install: python-venv
+	@echo "Building and installing Python extension..."
+	@$(VENV_DIR)/bin/maturin develop --release --features python
+	@echo "✓ Python extension installed into venv"
+	@echo ""
+	@echo "To use the Python bindings:"
+	@echo "  source $(VENV_DIR)/bin/activate"
+	@echo "  python -c 'import ash_flare; print(ash_flare)'"
+
+python-dev: python-venv
+	@echo "Building Python extension in development mode..."
+	@$(VENV_DIR)/bin/maturin develop --features python
+	@echo "✓ Python extension installed in development mode"
+	@echo ""
+	@echo "To use the Python bindings:"
+	@echo "  source $(VENV_DIR)/bin/activate"
+	@echo "  python -c 'import ash_flare; print(ash_flare)'"
+
+python-clean:
+	@echo "Cleaning Python build artifacts..."
+	@rm -rf $(VENV_DIR)
+	@rm -rf target/wheels
+	@rm -rf *.so
+	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	@find . -type f -name "*.pyc" -delete 2>/dev/null || true
+	@echo "✓ Python artifacts cleaned"
+
+python-test: python-dev
+	@echo "Testing Python bindings..."
+	@$(PYTHON) -c "import ash_flare; print('✓ Module imports successfully')"
+	@$(PYTHON) -c "from ash_flare import RestartPolicy; print('✓ RestartPolicy imported')"
+	@$(PYTHON) -c "from ash_flare import RestartStrategy; print('✓ RestartStrategy imported')"
+	@$(PYTHON) -c "from ash_flare import SupervisorSpec; print('✓ SupervisorSpec imported')"
+	@echo "✓ All Python binding tests passed"
