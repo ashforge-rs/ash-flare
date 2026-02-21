@@ -589,9 +589,10 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
         let worker = StatefulWorkerProcess::spawn(spec, self.name.clone(), self.control_tx.clone());
 
         self.children.push(StatefulChild::Worker(worker));
-        slog::debug!(slog_scope::logger(), "dynamically started child";
-            "supervisor" => &self.name,
-            "child" => &id
+        tracing::debug!(
+            supervisor = %self.name,
+            child = %id,
+            "dynamically started child"
         );
 
         Ok(id)
@@ -624,18 +625,20 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
             Ok(Ok(Ok(()))) => {
                 // Initialization succeeded
                 self.children.push(StatefulChild::Worker(worker));
-                slog::debug!(slog_scope::logger(), "linked child started successfully";
-                    "supervisor" => &self.name,
-                    "child" => &id
+                tracing::debug!(
+                    supervisor = %self.name,
+                    child = %id,
+                    "linked child started successfully"
                 );
                 Ok(id)
             }
             Ok(Ok(Err(reason))) => {
                 // Initialization failed - worker sent error
-                slog::error!(slog_scope::logger(), "linked child initialization failed";
-                    "supervisor" => &self.name,
-                    "child" => &id,
-                    "reason" => &reason
+                tracing::error!(
+                    supervisor = %self.name,
+                    child = %id,
+                    reason = %reason,
+                    "linked child initialization failed"
                 );
                 // Note: init failures do NOT trigger restart policies
                 Err(StatefulSupervisorError::InitializationFailed {
@@ -645,9 +648,10 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
             }
             Ok(Err(_)) => {
                 // Channel closed - worker panicked before sending result
-                slog::error!(slog_scope::logger(), "linked child panicked during initialization";
-                    "supervisor" => &self.name,
-                    "child" => &id
+                tracing::error!(
+                    supervisor = %self.name,
+                    child = %id,
+                    "linked child panicked during initialization"
                 );
                 Err(StatefulSupervisorError::InitializationFailed {
                     child_id: id,
@@ -656,10 +660,11 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
             }
             Err(_) => {
                 // Timeout
-                slog::error!(slog_scope::logger(), "linked child initialization timed out";
-                    "supervisor" => &self.name,
-                    "child" => &id,
-                    "timeout" => ?timeout
+                tracing::error!(
+                    supervisor = %self.name,
+                    child = %id,
+                    timeout_secs = ?timeout.as_secs(),
+                    "linked child initialization timed out"
                 );
                 Err(StatefulSupervisorError::InitializationTimeout {
                     child_id: id,
@@ -679,9 +684,10 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
         let mut child = self.children.remove(position);
         child.shutdown().await;
 
-        slog::debug!(slog_scope::logger(), "terminated child";
-            "supervisor" => &self.name,
-            "child" => id
+        tracing::debug!(
+            supervisor = %self.name,
+            child = %id,
+            "terminated child"
         );
         Ok(())
     }
@@ -701,18 +707,20 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
     }
 
     async fn handle_child_terminated(&mut self, id: ChildId, reason: ChildExitReason) {
-        slog::debug!(slog_scope::logger(), "child terminated";
-            "supervisor" => &self.name,
-            "child" => &id,
-            "reason" => ?reason
+        tracing::debug!(
+            supervisor = %self.name,
+            child = %id,
+            reason = ?reason,
+            "child terminated"
         );
 
         let position = match self.children.iter().position(|c| c.id() == id) {
             Some(pos) => pos,
             None => {
-                slog::warn!(slog_scope::logger(), "terminated child not found in list";
-                    "supervisor" => &self.name,
-                    "child" => &id
+                tracing::warn!(
+                    supervisor = %self.name,
+                    child = %id,
+                    "terminated child not found in list"
                 );
                 return;
             }
@@ -729,11 +737,12 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
         };
 
         if !should_restart {
-            slog::debug!(slog_scope::logger(), "not restarting child";
-                "supervisor" => &self.name,
-                "child" => &id,
-                "policy" => ?self.children[position].restart_policy(),
-                "reason" => ?reason
+            tracing::debug!(
+                supervisor = %self.name,
+                child = %id,
+                policy = ?self.children[position].restart_policy(),
+                reason = ?reason,
+                "not restarting child"
             );
             self.children.remove(position);
             return;
@@ -741,8 +750,9 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
 
         // Check restart intensity
         if self.restart_tracker.record_restart() {
-            slog::error!(slog_scope::logger(), "restart intensity exceeded, shutting down";
-                "supervisor" => &self.name
+            tracing::error!(
+                supervisor = %self.name,
+                "restart intensity exceeded, shutting down"
             );
             self.shutdown_children().await;
             return;
@@ -777,9 +787,10 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
         // Restart based on type
         match restart_info {
             StatefulRestartInfo::Worker(spec) => {
-                slog::debug!(slog_scope::logger(), "restarting worker";
-                    "supervisor" => &self.name,
-                    "worker" => &spec.id
+                tracing::debug!(
+                    supervisor = %self.name,
+                    worker = %spec.id,
+                    "restarting worker"
                 );
                 let new_worker = StatefulWorkerProcess::spawn(
                     spec.clone(),
@@ -787,33 +798,37 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
                     self.control_tx.clone(),
                 );
                 self.children[position] = StatefulChild::Worker(new_worker);
-                slog::debug!(slog_scope::logger(), "worker restarted";
-                    "supervisor" => &self.name,
-                    "worker" => &spec.id
+                tracing::debug!(
+                    supervisor = %self.name,
+                    worker = %spec.id,
+                    "worker restarted"
                 );
             }
             StatefulRestartInfo::Supervisor(spec) => {
                 let name = spec.name.clone();
-                slog::debug!(slog_scope::logger(), "restarting supervisor";
-                    "supervisor" => &self.name,
-                    "child_supervisor" => &name
+                tracing::debug!(
+                    supervisor = %self.name,
+                    child_supervisor = %name,
+                    "restarting supervisor"
                 );
                 let new_handle = StatefulSupervisorHandle::start((*spec).clone());
                 self.children[position] = StatefulChild::Supervisor {
                     handle: new_handle,
                     spec,
                 };
-                slog::debug!(slog_scope::logger(), "supervisor restarted";
-                    "supervisor" => &self.name,
-                    "child_supervisor" => &name
+                tracing::debug!(
+                    supervisor = %self.name,
+                    child_supervisor = %name,
+                    "supervisor restarted"
                 );
             }
         }
     }
 
     async fn restart_all_children(&mut self) {
-        slog::debug!(slog_scope::logger(), "restarting all children (one_for_all)";
-            "supervisor" => &self.name
+        tracing::debug!(
+            supervisor = %self.name,
+            "restarting all children (one_for_all)"
         );
 
         // Shutdown all children
@@ -831,18 +846,20 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
                     self.control_tx.clone(),
                 );
                 *child = StatefulChild::Worker(new_worker);
-                slog::debug!(slog_scope::logger(), "child restarted";
-                    "supervisor" => &self.name,
-                    "child" => &spec.id
+                tracing::debug!(
+                    supervisor = %self.name,
+                    child = %spec.id,
+                    "child restarted"
                 );
             }
         }
     }
 
     async fn restart_from(&mut self, position: usize) {
-        slog::debug!(slog_scope::logger(), "restarting from position (rest_for_one)";
-            "supervisor" => &self.name,
-            "position" => position
+        tracing::debug!(
+            supervisor = %self.name,
+            position = %position,
+            "restarting from position (rest_for_one)"
         );
 
         for i in position..self.children.len() {
@@ -856,9 +873,10 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
                     self.control_tx.clone(),
                 );
                 self.children[i] = StatefulChild::Worker(new_worker);
-                slog::debug!(slog_scope::logger(), "child restarted";
-                    "supervisor" => &self.name,
-                    "child" => &spec.id
+                tracing::debug!(
+                    supervisor = %self.name,
+                    child = %spec.id,
+                    "child restarted"
                 );
             }
         }
@@ -869,9 +887,10 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
             let id = child.id().to_owned();
             let mut child = child;
             child.shutdown().await;
-            slog::debug!(slog_scope::logger(), "shut down child";
-                "supervisor" => &self.name,
-                "child" => &id
+            tracing::debug!(
+                supervisor = %self.name,
+                child = %id,
+                "shut down child"
             );
         }
     }
@@ -898,9 +917,7 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
         let runtime_name = Arc::clone(&name_arc);
         tokio::spawn(async move {
             runtime.run().await;
-            slog::debug!(slog_scope::logger(), "supervisor stopped";
-                "name" => &*runtime_name
-            );
+            tracing::debug!(name = %*runtime_name, "supervisor stopped");
         });
 
         Self {

@@ -5,7 +5,6 @@
 
 use ash_flare::{StatefulSupervisorHandle, Worker, WorkerContext, stateful_supervision_tree};
 use async_trait::async_trait;
-use slog::Drain;
 use std::sync::Arc;
 use tokio::time::{Duration, sleep};
 
@@ -76,13 +75,6 @@ impl Worker for AuctionWorker {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logger
-    let decorator = slog_term::TermDecorator::new().build();
-    let drain = slog_term::FullFormat::new(decorator).build().fuse();
-    let drain = slog_async::Async::new(drain).build().fuse();
-    let logger = slog::Logger::root(drain, slog::o!());
-    let _guard = slog_scope::set_global_logger(logger);
-
     println!("🔨 Starting stateful auction supervisor...\n");
 
     // Build supervision tree using the macro

@@ -4,3 +4,14 @@
 *.sh
 !lint.sh
 *.cast
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+wheels/
+.mypy_cache/

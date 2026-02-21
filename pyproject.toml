@@ -1,0 +1,44 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ash-flare"
+version = "2.0.0"
+description = "Fault-tolerant supervision trees for Rust with distributed capabilities inspired by Erlang/OTP"
+authors = [
+    {name = "Giorgos Ntemiris", email = "ntemirisgiorgos3@gmail.com"}
+]
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries",
+]
+keywords = ["supervisor", "fault-tolerance", "resilience", "distributed"]
+dependencies = [
+    "maturin>=1.12.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ashforge-rs/ash-flare"
+Repository = "https://github.com/ashforge-rs/ash-flare"
+Documentation = "https://docs.rs/ash-flare"
+
+[tool.maturin]
+features = ["python"]
+module-name = "ash_flare"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+]
