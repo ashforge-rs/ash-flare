@@ -1,7 +1,7 @@
 //! Basic Python bindings for restart and child types
 
-use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
 
 use crate::restart::{RestartIntensity, RestartPolicy, RestartStrategy};
 use crate::types::{ChildExitReason, ChildInfo, ChildType};
@@ -21,26 +21,37 @@ impl PyRestartPolicy {
             "permanent" => RestartPolicy::Permanent,
             "temporary" => RestartPolicy::Temporary,
             "transient" => RestartPolicy::Transient,
-            _ => return Err(PyValueError::new_err("Invalid restart policy. Use 'permanent', 'temporary', or 'transient'")),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "Invalid restart policy. Use 'permanent', 'temporary', or 'transient'",
+                ));
+            }
         };
         Ok(PyRestartPolicy { inner })
     }
 
     #[staticmethod]
     fn permanent() -> Self {
-        PyRestartPolicy { inner: RestartPolicy::Permanent }
+        PyRestartPolicy {
+            inner: RestartPolicy::Permanent,
+        }
     }
 
     #[staticmethod]
     fn temporary() -> Self {
-        PyRestartPolicy { inner: RestartPolicy::Temporary }
+        PyRestartPolicy {
+            inner: RestartPolicy::Temporary,
+        }
     }
 
     #[staticmethod]
     fn transient() -> Self {
-        PyRestartPolicy { inner: RestartPolicy::Transient }
+        PyRestartPolicy {
+            inner: RestartPolicy::Transient,
+        }
     }
 
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     fn __repr__(&self) -> String {
         match self.inner {
             RestartPolicy::Permanent => "RestartPolicy.permanent()".to_string(),
@@ -65,26 +76,37 @@ impl PyRestartStrategy {
             "oneforone" | "one_for_one" => RestartStrategy::OneForOne,
             "oneforall" | "one_for_all" => RestartStrategy::OneForAll,
             "restforone" | "rest_for_one" => RestartStrategy::RestForOne,
-            _ => return Err(PyValueError::new_err("Invalid restart strategy. Use 'one_for_one', 'one_for_all', or 'rest_for_one'")),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "Invalid restart strategy. Use 'one_for_one', 'one_for_all', or 'rest_for_one'",
+                ));
+            }
         };
         Ok(PyRestartStrategy { inner })
     }
 
     #[staticmethod]
     fn one_for_one() -> Self {
-        PyRestartStrategy { inner: RestartStrategy::OneForOne }
+        PyRestartStrategy {
+            inner: RestartStrategy::OneForOne,
+        }
     }
 
     #[staticmethod]
     fn one_for_all() -> Self {
-        PyRestartStrategy { inner: RestartStrategy::OneForAll }
+        PyRestartStrategy {
+            inner: RestartStrategy::OneForAll,
+        }
     }
 
     #[staticmethod]
     fn rest_for_one() -> Self {
-        PyRestartStrategy { inner: RestartStrategy::RestForOne }
+        PyRestartStrategy {
+            inner: RestartStrategy::RestForOne,
+        }
     }
 
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     fn __repr__(&self) -> String {
         match self.inner {
             RestartStrategy::OneForOne => "RestartStrategy.one_for_one()".to_string(),
@@ -123,9 +145,10 @@ impl PyRestartIntensity {
     }
 
     fn __repr__(&self) -> String {
-        format!("RestartIntensity(max_restarts={}, time_window_secs={})", 
-                self.inner.max_restarts, 
-                self.inner.within_seconds)
+        format!(
+            "RestartIntensity(max_restarts={}, time_window_secs={})",
+            self.inner.max_restarts, self.inner.within_seconds
+        )
     }
 }
 
@@ -204,10 +227,10 @@ impl PyChildInfo {
     }
 
     fn __repr__(&self) -> String {
-        format!("ChildInfo(id='{}', child_type={:?}, restart_policy={:?})", 
-                self.id, 
-                self.child_type.inner, 
-                self.restart_policy)
+        format!(
+            "ChildInfo(id='{}', child_type={:?}, restart_policy={:?})",
+            self.id, self.child_type.inner, self.restart_policy
+        )
     }
 }
 
@@ -215,7 +238,9 @@ impl From<ChildInfo> for PyChildInfo {
     fn from(info: ChildInfo) -> Self {
         PyChildInfo {
             id: info.id,
-            child_type: PyChildType { inner: info.child_type },
+            child_type: PyChildType {
+                inner: info.child_type,
+            },
             restart_policy: info.restart_policy,
         }
     }

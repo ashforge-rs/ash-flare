@@ -5,8 +5,8 @@
 //! await asyncio.to_thread(handle.send, "message")
 //! ```
 
-use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
 
 use crate::mailbox::{Mailbox, MailboxConfig, MailboxHandle};
 
@@ -55,7 +55,8 @@ impl PyMailboxHandle {
         let handle = self.inner.clone();
         let runtime = get_runtime();
         runtime.block_on(async move {
-            handle.send(message)
+            handle
+                .send(message)
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("Failed to send: {}", e)))
         })
@@ -90,9 +91,7 @@ pub struct PyMailbox {
 impl PyMailbox {
     fn recv(&mut self, _py: Python<'_>) -> PyResult<Option<String>> {
         let runtime = get_runtime();
-        Ok(runtime.block_on(async move {
-            self.inner.recv().await
-        }))
+        Ok(runtime.block_on(async move { self.inner.recv().await }))
     }
 
     fn try_recv(&mut self) -> PyResult<String> {
@@ -101,6 +100,7 @@ impl PyMailbox {
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to receive: {}", e)))
     }
 
+    #[allow(clippy::unused_self)]
     fn __repr__(&self) -> String {
         "Mailbox()".to_string()
     }

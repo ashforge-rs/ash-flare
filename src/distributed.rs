@@ -228,10 +228,7 @@ impl<W: Worker> SupervisorServer<W> {
     /// Start listening on a TCP socket
     pub async fn listen_tcp(self, addr: impl AsRef<str>) -> Result<(), DistributedError> {
         let listener = TcpListener::bind(addr.as_ref()).await?;
-        tracing::info!(
-            address = addr.as_ref(),
-            "server listening on tcp"
-        );
+        tracing::info!(address = addr.as_ref(), "server listening on tcp");
 
         loop {
             let (mut stream, peer) = listener.accept().await?;

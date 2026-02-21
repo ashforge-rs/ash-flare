@@ -1,8 +1,8 @@
 //! Python worker implementation
 
+use crate::worker::{Worker, WorkerError};
 use pyo3::prelude::*;
 use std::sync::Arc;
-use crate::worker::{Worker, WorkerError};
 
 /// Python-compatible wrapper for Worker that accepts Python callables
 #[derive(Clone)]
@@ -21,7 +21,7 @@ impl Worker for PyWorker {
         // each other (e.g., when using time.sleep())
         let callable = self.callable.clone();
         let name = self.name.clone();
-        
+
         // Spawn a dedicated OS thread for this worker
         let handle = std::thread::spawn(move || {
             Python::with_gil(|py| {
@@ -33,14 +33,12 @@ impl Worker for PyWorker {
                     })
             })
         });
-        
+
         // Wait for the thread to complete asynchronously (don't block the runtime)
         tokio::task::spawn_blocking(move || {
             handle
                 .join()
-                .map_err(|e| {
-                    WorkerError::WorkerFailed(format!("Worker thread panicked: {:?}", e))
-                })
+                .map_err(|e| WorkerError::WorkerFailed(format!("Worker thread panicked: {:?}", e)))
         })
         .await
         .map_err(|e| WorkerError::WorkerFailed(format!("Failed to join worker task: {}", e)))??

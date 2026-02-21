@@ -5,13 +5,13 @@
 //! handle = await asyncio.to_thread(RemoteSupervisorHandle.connect_tcp, "127.0.0.1:8080")
 //! ```
 
-use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
 
 use crate::distributed::{RemoteSupervisorHandle, SupervisorAddress};
 
-use super::types::{PyChildInfo, PyChildType};
 use super::get_runtime;
+use super::types::{PyChildInfo, PyChildType};
 
 /// Python-facing supervisor address for distributed supervision
 #[pyclass(name = "SupervisorAddress")]
@@ -57,10 +57,9 @@ impl PyRemoteSupervisorHandle {
     #[staticmethod]
     fn connect_tcp(addr: String, _py: Python<'_>) -> PyResult<Self> {
         let runtime = get_runtime();
-        let result = runtime.block_on(async move {
-            RemoteSupervisorHandle::connect_tcp(addr).await
-        });
-        
+        let result =
+            runtime.block_on(async move { RemoteSupervisorHandle::connect_tcp(addr).await });
+
         result
             .map(|inner| PyRemoteSupervisorHandle { inner })
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to connect: {}", e)))
@@ -70,10 +69,9 @@ impl PyRemoteSupervisorHandle {
     #[cfg(unix)]
     fn connect_unix(path: String, _py: Python<'_>) -> PyResult<Self> {
         let runtime = get_runtime();
-        let result = runtime.block_on(async move {
-            RemoteSupervisorHandle::connect_unix(path).await
-        });
-        
+        let result =
+            runtime.block_on(async move { RemoteSupervisorHandle::connect_unix(path).await });
+
         result
             .map(|inner| PyRemoteSupervisorHandle { inner })
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to connect: {}", e)))
@@ -82,19 +80,16 @@ impl PyRemoteSupervisorHandle {
     fn shutdown(&self, _py: Python<'_>) -> PyResult<()> {
         let handle = self.inner.clone();
         let runtime = get_runtime();
-        runtime.block_on(async move {
-            handle.shutdown().await
-        })
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to shutdown: {}", e)))
+        runtime
+            .block_on(async move { handle.shutdown().await })
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to shutdown: {}", e)))
     }
 
     fn which_children(&self, _py: Python<'_>) -> PyResult<Vec<PyChildInfo>> {
         let handle = self.inner.clone();
         let runtime = get_runtime();
-        let result = runtime.block_on(async move {
-            handle.which_children().await
-        });
-        
+        let result = runtime.block_on(async move { handle.which_children().await });
+
         match result {
             Ok(children) => {
                 // Convert distributed::ChildInfo to types::ChildInfo then to PyChildInfo
@@ -102,25 +97,30 @@ impl PyRemoteSupervisorHandle {
                     .into_iter()
                     .map(|child| PyChildInfo {
                         id: child.id,
-                        child_type: PyChildType { inner: child.child_type },
+                        child_type: PyChildType {
+                            inner: child.child_type,
+                        },
                         restart_policy: child.restart_policy,
                     })
                     .collect();
                 Ok(py_children)
             }
-            Err(e) => Err(PyRuntimeError::new_err(format!("Failed to get children: {}", e)))
+            Err(e) => Err(PyRuntimeError::new_err(format!(
+                "Failed to get children: {}",
+                e
+            ))),
         }
     }
 
     fn terminate_child(&self, child_id: String, _py: Python<'_>) -> PyResult<()> {
         let handle = self.inner.clone();
         let runtime = get_runtime();
-        runtime.block_on(async move {
-            handle.terminate_child(&child_id).await
-        })
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to terminate child: {}", e)))
+        runtime
+            .block_on(async move { handle.terminate_child(&child_id).await })
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to terminate child: {}", e)))
     }
 
+    #[allow(clippy::unused_self)]
     fn __repr__(&self) -> String {
         "RemoteSupervisorHandle()".to_string()
     }
