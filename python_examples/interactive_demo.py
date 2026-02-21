@@ -18,6 +18,11 @@ import sys
 from datetime import datetime
 
 
+def dummy_worker():
+    """Dummy worker function for visualization - sleeps indefinitely"""
+    time.sleep(3600)
+
+
 class SupervisorMonitor:
     """Monitor and display supervisor tree status"""
     
@@ -110,17 +115,17 @@ def build_demo_tree():
     app_spec.with_restart_intensity(af.RestartIntensity(3, 5))
     
     # Add workers
-    app_spec.add_worker("database-1", af.RestartPolicy.permanent())
-    app_spec.add_worker("database-2", af.RestartPolicy.permanent())
-    app_spec.add_worker("api-server", af.RestartPolicy.permanent())
-    app_spec.add_worker("cache", af.RestartPolicy.transient())
-    app_spec.add_worker("metrics", af.RestartPolicy.temporary())
+    app_spec.add_worker("database-1", af.RestartPolicy.permanent(), dummy_worker)
+    app_spec.add_worker("database-2", af.RestartPolicy.permanent(), dummy_worker)
+    app_spec.add_worker("api-server", af.RestartPolicy.permanent(), dummy_worker)
+    app_spec.add_worker("cache", af.RestartPolicy.transient(), dummy_worker)
+    app_spec.add_worker("metrics", af.RestartPolicy.temporary(), dummy_worker)
     
     # Create nested supervisor for background jobs
     jobs_spec = af.SupervisorSpec("background-jobs")
     jobs_spec.with_restart_strategy(af.RestartStrategy.one_for_all())
-    jobs_spec.add_worker("email-worker", af.RestartPolicy.transient())
-    jobs_spec.add_worker("cleanup-worker", af.RestartPolicy.transient())
+    jobs_spec.add_worker("email-worker", af.RestartPolicy.transient(), dummy_worker)
+    app_spec.add_worker("cleanup-worker", af.RestartPolicy.transient(), dummy_worker)
     
     app_spec.add_supervisor(jobs_spec)
     
@@ -149,7 +154,7 @@ def interactive_loop(root_handle, monitor):
         if monitor.iteration % 5 == 0:
             worker_id = f"dynamic-worker-{next_worker_id}"
             try:
-                root_handle.start_child(worker_id, af.RestartPolicy.temporary())
+                root_handle.start_child(worker_id, af.RestartPolicy.temporary(), dummy_worker)
                 next_worker_id += 1
             except Exception as e:
                 pass  # Worker might already exist

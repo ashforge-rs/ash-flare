@@ -79,18 +79,23 @@ def render_supervisor_tree(root_handle):
 def build_example_tree():
     """Build a complex supervisor tree for demonstration"""
     
+    # Dummy worker function (does nothing, just for tree structure)
+    def dummy_worker():
+        import time
+        time.sleep(3600)  # Sleep for a long time
+    
     # Create leaf supervisors with workers
     db_supervisor = af.SupervisorSpec("database-pool")
     db_supervisor.with_restart_strategy(af.RestartStrategy.one_for_all())
-    db_supervisor.add_worker("db-conn-1", af.RestartPolicy.permanent())
-    db_supervisor.add_worker("db-conn-2", af.RestartPolicy.permanent())
-    db_supervisor.add_worker("db-conn-3", af.RestartPolicy.permanent())
+    db_supervisor.add_worker("db-conn-1", af.RestartPolicy.permanent(), dummy_worker)
+    db_supervisor.add_worker("db-conn-2", af.RestartPolicy.permanent(), dummy_worker)
+    db_supervisor.add_worker("db-conn-3", af.RestartPolicy.permanent(), dummy_worker)
     
     api_supervisor = af.SupervisorSpec("api-servers")
     api_supervisor.with_restart_strategy(af.RestartStrategy.one_for_one())
-    api_supervisor.add_worker("api-1", af.RestartPolicy.permanent())
-    api_supervisor.add_worker("api-2", af.RestartPolicy.permanent())
-    api_supervisor.add_worker("api-health", af.RestartPolicy.transient())
+    api_supervisor.add_worker("api-1", af.RestartPolicy.permanent(), dummy_worker)
+    api_supervisor.add_worker("api-2", af.RestartPolicy.permanent(), dummy_worker)
+    api_supervisor.add_worker("api-health", af.RestartPolicy.transient(), dummy_worker)
     
     # Create root supervisor
     root_spec = af.SupervisorSpec("application")
@@ -98,9 +103,9 @@ def build_example_tree():
     root_spec.with_restart_intensity(af.RestartIntensity(5, 10))
     
     # Add workers to root
-    root_spec.add_worker("config-loader", af.RestartPolicy.permanent())
-    root_spec.add_worker("metrics-collector", af.RestartPolicy.transient())
-    root_spec.add_worker("cache-warmer", af.RestartPolicy.temporary())
+    root_spec.add_worker("config-loader", af.RestartPolicy.permanent(), dummy_worker)
+    root_spec.add_worker("metrics-collector", af.RestartPolicy.transient(), dummy_worker)
+    root_spec.add_worker("cache-warmer", af.RestartPolicy.temporary(), dummy_worker)
     
     # Add nested supervisors
     root_spec.add_supervisor(db_supervisor)
