@@ -13,7 +13,7 @@ use crate::mailbox::{Mailbox, MailboxConfig, MailboxHandle};
 use super::get_runtime;
 
 /// Python-facing mailbox configuration
-#[pyclass(name = "MailboxConfig")]
+#[pyclass(name = "MailboxConfig", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyMailboxConfig {
     pub(crate) inner: MailboxConfig,

@@ -14,7 +14,7 @@ use super::get_runtime;
 use super::types::{PyChildInfo, PyChildType};
 
 /// Python-facing supervisor address for distributed supervision
-#[pyclass(name = "SupervisorAddress")]
+#[pyclass(name = "SupervisorAddress", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PySupervisorAddress {
     #[allow(dead_code)]

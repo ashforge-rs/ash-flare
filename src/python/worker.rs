@@ -24,7 +24,7 @@ impl Worker for PyWorker {
 
         // Spawn a dedicated OS thread for this worker
         let handle = std::thread::spawn(move || {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 callable
                     .call0(py)
                     .map(|_| ()) // Discard the return value

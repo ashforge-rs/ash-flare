@@ -7,7 +7,7 @@ use crate::restart::{RestartIntensity, RestartPolicy, RestartStrategy};
 use crate::types::{ChildExitReason, ChildInfo, ChildType};
 
 /// Python-facing restart policy enum
-#[pyclass(name = "RestartPolicy")]
+#[pyclass(name = "RestartPolicy", from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyRestartPolicy {
     pub(crate) inner: RestartPolicy,
@@ -62,7 +62,7 @@ impl PyRestartPolicy {
 }
 
 /// Python-facing restart strategy enum
-#[pyclass(name = "RestartStrategy")]
+#[pyclass(name = "RestartStrategy", from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyRestartStrategy {
     pub(crate) inner: RestartStrategy,
@@ -117,7 +117,7 @@ impl PyRestartStrategy {
 }
 
 /// Python-facing restart intensity
-#[pyclass(name = "RestartIntensity")]
+#[pyclass(name = "RestartIntensity", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyRestartIntensity {
     pub(crate) inner: RestartIntensity,
@@ -153,7 +153,7 @@ impl PyRestartIntensity {
 }
 
 /// Python-facing child type
-#[pyclass(name = "ChildType")]
+#[pyclass(name = "ChildType", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyChildType {
     pub(crate) inner: ChildType,
@@ -178,7 +178,7 @@ impl PyChildType {
 }
 
 /// Python-facing child exit reason
-#[pyclass(name = "ChildExitReason")]
+#[pyclass(name = "ChildExitReason", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyChildExitReason {
     #[allow(dead_code)]
@@ -209,7 +209,7 @@ impl PyChildExitReason {
 }
 
 /// Python-facing child info
-#[pyclass(name = "ChildInfo")]
+#[pyclass(name = "ChildInfo", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyChildInfo {
     #[pyo3(get)]

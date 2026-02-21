@@ -34,9 +34,9 @@ dashmap = "6.1"
 rand = "0.9"
 tracing = "0.1"
 time = "0.3.47"
-pyo3 = { version = "0.23", features = ["abi3-py39"], optional = false }
-pyo3-async-runtimes = { version = "0.23", features = ["tokio-runtime"], optional = false }
-pythonize = "0.23"
+pyo3 = { version = "0.28.2", features = ["abi3-py39"], optional = false }
+pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"], optional = false }
+pythonize = "0.28"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }

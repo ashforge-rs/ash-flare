@@ -2,11 +2,12 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyAny;
 
 use crate::types::WorkerContext;
 
 /// Python-facing WorkerContext for stateful workers
-#[pyclass(name = "WorkerContext")]
+#[pyclass(name = "WorkerContext", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyWorkerContext {
     pub(crate) inner: WorkerContext,
@@ -21,7 +22,7 @@ impl PyWorkerContext {
         }
     }
 
-    fn get(&self, key: &str, py: Python<'_>) -> PyResult<PyObject> {
+    fn get(&self, key: &str, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match self.inner.get(key) {
             Some(value) => {
                 // Convert serde_json::Value to Python object
@@ -34,7 +35,7 @@ impl PyWorkerContext {
     }
 
     #[allow(clippy::needless_pass_by_value)]
-    fn set(&self, key: &str, value: PyObject, py: Python<'_>) -> PyResult<()> {
+    fn set(&self, key: &str, value: Py<PyAny>, py: Python<'_>) -> PyResult<()> {
         // Convert Python object to serde_json::Value
         let json_value: serde_json::Value = pythonize::depythonize(value.bind(py))
             .map_err(|e| PyValueError::new_err(format!("Failed to convert value: {}", e)))?;
@@ -43,7 +44,7 @@ impl PyWorkerContext {
         Ok(())
     }
 
-    fn delete(&self, key: &str, py: Python<'_>) -> PyResult<PyObject> {
+    fn delete(&self, key: &str, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match self.inner.delete(key) {
             Some(value) => pythonize::pythonize(py, &value)
                 .map(pyo3::Bound::unbind)
