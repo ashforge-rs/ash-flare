@@ -24,7 +24,7 @@ default = []
 python = ["pyo3/extension-module"]
 
 [dependencies]
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1.50", features = ["full"] }
 async-trait = "0.1"
 thiserror = "2.0"
 rkyv = { version = "0.8", features = ["alloc"] }
