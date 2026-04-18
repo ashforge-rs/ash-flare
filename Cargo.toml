@@ -31,7 +31,7 @@ rkyv = { version = "0.8", features = ["alloc"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dashmap = "6.1"
-rand = "0.9"
+rand = "0.10"
 tracing = "0.1"
 time = "0.3.47"
 pyo3 = { version = "0.28.2", features = ["abi3-py39"], optional = false }
