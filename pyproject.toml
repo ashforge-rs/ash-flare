@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ash-flare"
-version = "2.0.0"
+version = "2.2.0"
 description = "Fault-tolerant supervision trees for Rust with distributed capabilities inspired by Erlang/OTP"
 authors = [
     {name = "Giorgos Ntemiris", email = "ntemirisgiorgos3@gmail.com"}
@@ -25,9 +25,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 keywords = ["supervisor", "fault-tolerance", "resilience", "distributed"]
-dependencies = [
-    "maturin>=1.12.0",
-]
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/ashforge-rs/ash-flare"

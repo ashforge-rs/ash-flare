@@ -2,6 +2,8 @@
 
 cargo clippy \
     "$@" \
+    -W clippy::all \
+    -W clippy::pedantic \
     -D clippy::unwrap_used \
     -D clippy::expect_used \
     -D clippy::panic \
@@ -15,24 +17,25 @@ cargo clippy \
     -D clippy::too_many_arguments \
     -D clippy::fn_params_excessive_bools \
     -D clippy::wildcard_imports \
+    -D clippy::let_underscore_must_use \
+    -D clippy::missing_errors_doc \
     -D clippy::missing_safety_doc \
     -D clippy::undocumented_unsafe_blocks \
     -D clippy::multiple_unsafe_ops_per_block \
+    -D clippy::indexing_slicing \
+    -D clippy::arithmetic_side_effects \
+    -D clippy::float_arithmetic \
+    -D clippy::as_conversions \
+    -D clippy::cast_possible_truncation \
+    -D clippy::cast_possible_wrap \
+    -D clippy::cast_precision_loss \
+    -D clippy::cast_sign_loss \
     -D clippy::mem_forget \
     -D clippy::panic_in_result_fn \
-    -W clippy::all \
-   -W clippy::pedantic \
-    -A clippy::must_use_candidate \
-    -A clippy::return_self_not_must_use \
-    -A clippy::missing_errors_doc \
-    -A clippy::missing_panics_doc \
-    -A clippy::doc_markdown \
-    -A clippy::missing_fields_in_debug \
-    -A clippy::unnecessary_wraps \
-    -A clippy::unused_async \
-    -A clippy::uninlined_format_args \
-    -A clippy::manual_let_else \
-    -A clippy::single_match_else \
-    -A clippy::map_unwrap_or \
-    -A clippy::cast_possible_truncation \
-    -A clippy::unchecked_time_subtraction
+    -D clippy::shadow_reuse \
+    -D clippy::shadow_same \
+    -D clippy::shadow_unrelated \
+    -D clippy::string_slice \
+    -D clippy::string_add \
+    -D clippy::str_to_string \
+    -D clippy::missing_panics_doc
