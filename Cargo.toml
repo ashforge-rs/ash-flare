@@ -13,7 +13,7 @@ repository = "https://github.com/ashforge-rs/ash-flare"
 readme = "README.md"
 keywords = ["supervisor", "fault-tolerance", "resilience", "distributed"]
 categories = ["asynchronous", "concurrency"]
-rust-version = "1.85"
+rust-version = "1.88"
 
 [lib]
 name = "ash_flare"
