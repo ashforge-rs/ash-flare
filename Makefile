@@ -134,7 +134,7 @@ release:
 	@echo ""
 	@echo "Step 3: Committing version bump..."
 	@git add Cargo.toml
-	@git commit -m "chore: bump version to $(VERSION)"
+	@git diff --cached --quiet || git commit -m "chore: bump version to $(VERSION)"
 	@echo ""
 	@echo "Step 4: Creating and pushing tag..."
 	@$(MAKE) tag VERSION=$(VERSION)
