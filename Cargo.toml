@@ -1,6 +1,6 @@
 [package]
 name = "ash-flare"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2024"
 authors = ["Giorgos Ntemiris <ntemirisgiorgos3@gmail.com>"]
 autoexamples = false
@@ -34,8 +34,8 @@ dashmap = "6.1"
 rand = "0.10"
 tracing = "0.1"
 time = "0.3.47"
-pyo3 = { version = "0.28.2", features = ["abi3-py39"], optional = false }
-pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"], optional = false }
+pyo3 = { version = "0.28.2", features = ["abi3-py39"] }
+pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 pythonize = "0.28"
 
 [dev-dependencies]

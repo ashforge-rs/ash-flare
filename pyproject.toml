@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ash-flare"
-version = "2.2.0"
+version = "2.3.0"
 description = "Fault-tolerant supervision trees for Rust with distributed capabilities inspired by Erlang/OTP"
 authors = [
     {name = "Giorgos Ntemiris", email = "ntemirisgiorgos3@gmail.com"}
