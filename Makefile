@@ -135,7 +135,7 @@ release:
 	@$(MAKE) bump-version VERSION=$(VERSION)
 	@echo ""
 	@echo "Step 3: Committing version bump..."
-	@git add Cargo.toml
+	@git add Cargo.toml pyproject.toml Cargo.lock
 	@git diff --cached --quiet || git commit -m "chore: bump version to $(VERSION)"
 	@echo ""
 	@echo "Step 4: Creating and pushing tag..."
