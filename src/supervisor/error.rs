@@ -35,44 +35,39 @@ impl fmt::Display for SupervisorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SupervisorError::NoChildren(name) => {
-                write!(f, "supervisor '{}' has no children", name)
+                write!(f, "supervisor '{name}' has no children")
             }
             SupervisorError::AllChildrenFailed(name) => {
                 write!(
                     f,
-                    "all children failed for supervisor '{}' - restart intensity limit exceeded",
-                    name
+                    "all children failed for supervisor '{name}' - restart intensity limit exceeded"
                 )
             }
             SupervisorError::ShuttingDown(name) => {
                 write!(
                     f,
-                    "supervisor '{}' is shutting down - operation not permitted",
-                    name
+                    "supervisor '{name}' is shutting down - operation not permitted"
                 )
             }
             SupervisorError::ChildAlreadyExists(id) => {
                 write!(
                     f,
-                    "child with id '{}' already exists - use a unique identifier",
-                    id
+                    "child with id '{id}' already exists - use a unique identifier"
                 )
             }
             SupervisorError::ChildNotFound(id) => {
                 write!(
                     f,
-                    "child with id '{}' not found - it may have already terminated",
-                    id
+                    "child with id '{id}' not found - it may have already terminated"
                 )
             }
             SupervisorError::InitializationFailed { child_id, reason } => {
-                write!(f, "child '{}' initialization failed: {}", child_id, reason)
+                write!(f, "child '{child_id}' initialization failed: {reason}")
             }
             SupervisorError::InitializationTimeout { child_id, timeout } => {
                 write!(
                     f,
-                    "child '{}' initialization timed out after {:?}",
-                    child_id, timeout
+                    "child '{child_id}' initialization timed out after {timeout:?}"
                 )
             }
         }

@@ -28,9 +28,7 @@ impl Worker for PyWorker {
                 callable
                     .call0(py)
                     .map(|_| ()) // Discard the return value
-                    .map_err(|e| {
-                        WorkerError::WorkerFailed(format!("Worker '{}' failed: {}", name, e))
-                    })
+                    .map_err(|e| WorkerError::WorkerFailed(format!("Worker '{name}' failed: {e}")))
             })
         });
 
@@ -38,10 +36,10 @@ impl Worker for PyWorker {
         tokio::task::spawn_blocking(move || {
             handle
                 .join()
-                .map_err(|e| WorkerError::WorkerFailed(format!("Worker thread panicked: {:?}", e)))
+                .map_err(|e| WorkerError::WorkerFailed(format!("Worker thread panicked: {e:?}")))
         })
         .await
-        .map_err(|e| WorkerError::WorkerFailed(format!("Failed to join worker task: {}", e)))??
+        .map_err(|e| WorkerError::WorkerFailed(format!("Failed to join worker task: {e}")))??
     }
 
     async fn initialize(&mut self) -> Result<(), Self::Error> {

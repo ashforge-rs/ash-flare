@@ -79,7 +79,8 @@ pub struct WorkerContext {
 }
 
 impl WorkerContext {
-    /// Creates a new empty WorkerContext.
+    /// Creates a new empty `WorkerContext`.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             store: Arc::new(DashMap::new()),
@@ -93,6 +94,7 @@ impl WorkerContext {
     /// Note: This method clones the value. For read-heavy workloads,
     /// consider caching values or using primitives that are cheap to clone.
     #[inline]
+    #[must_use]
     pub fn get(&self, key: &str) -> Option<serde_json::Value> {
         self.store.get(key).map(|entry| entry.value().clone())
     }
@@ -132,24 +134,28 @@ impl WorkerContext {
     ///
     /// Returns the previous value if it existed.
     #[inline]
+    #[must_use]
     pub fn delete(&self, key: &str) -> Option<serde_json::Value> {
         self.store.remove(key).map(|(_, v)| v)
     }
 
     /// Returns the number of key-value pairs in the store.
     #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.store.len()
     }
 
     /// Returns `true` if the store contains no key-value pairs.
     #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.store.is_empty()
     }
 
     /// Checks if a key exists in the store without retrieving the value.
     #[inline]
+    #[must_use]
     pub fn contains_key(&self, key: &str) -> bool {
         self.store.contains_key(key)
     }

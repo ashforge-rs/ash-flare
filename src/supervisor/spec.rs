@@ -50,12 +50,14 @@ impl<W: Worker> SupervisorSpec<W> {
     }
 
     /// Sets the restart strategy for this supervisor.
+    #[must_use]
     pub fn with_restart_strategy(mut self, strategy: RestartStrategy) -> Self {
         self.restart_strategy = strategy;
         self
     }
 
     /// Sets the restart intensity for this supervisor.
+    #[must_use]
     pub fn with_restart_intensity(mut self, intensity: RestartIntensity) -> Self {
         self.restart_intensity = intensity;
         self
@@ -63,6 +65,7 @@ impl<W: Worker> SupervisorSpec<W> {
 
     /// Adds a worker child to this supervisor specification.
     /// The factory function is used to create new worker instances (e.g., for restarts).
+    #[must_use]
     pub fn with_worker(
         mut self,
         id: impl Into<String>,
@@ -78,6 +81,7 @@ impl<W: Worker> SupervisorSpec<W> {
     }
 
     /// Adds a nested supervisor child to this supervisor specification.
+    #[must_use]
     pub fn with_supervisor(mut self, supervisor: SupervisorSpec<W>) -> Self {
         self.children
             .push(ChildSpec::Supervisor(Arc::new(supervisor)));

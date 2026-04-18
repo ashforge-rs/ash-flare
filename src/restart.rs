@@ -66,7 +66,7 @@ pub struct RestartIntensity {
 }
 
 impl RestartIntensity {
-    /// Creates a new RestartIntensity with the specified limits.
+    /// Creates a new `RestartIntensity` with the specified limits.
     ///
     /// # Examples
     /// ```
@@ -76,6 +76,7 @@ impl RestartIntensity {
     /// assert_eq!(intensity.within_seconds, 10);
     /// ```
     #[inline]
+    #[must_use]
     pub const fn new(max_restarts: usize, within_seconds: u64) -> Self {
         Self {
             max_restarts,
@@ -102,14 +103,16 @@ impl RestartTracker {
         Self {
             intensity,
             // Pre-allocate with max_restarts + 1 to avoid reallocations
-            restart_times: VecDeque::with_capacity(intensity.max_restarts + 1),
+            restart_times: VecDeque::with_capacity(intensity.max_restarts.saturating_add(1)),
         }
     }
 
     /// Records a restart and returns true if intensity limit exceeded
     pub(crate) fn record_restart(&mut self) -> bool {
         let now = Instant::now();
-        let cutoff = now - Duration::from_secs(self.intensity.within_seconds);
+        let cutoff = now
+            .checked_sub(Duration::from_secs(self.intensity.within_seconds))
+            .unwrap_or(now);
 
         // Remove old restarts outside the time window
         while let Some(&time) = self.restart_times.front() {

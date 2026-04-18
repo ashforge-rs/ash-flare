@@ -40,8 +40,8 @@ impl PySupervisorAddress {
 
     fn __repr__(&self) -> String {
         match &self.inner {
-            SupervisorAddress::Tcp(addr) => format!("SupervisorAddress.tcp('{}')", addr),
-            SupervisorAddress::Unix(path) => format!("SupervisorAddress.unix('{}')", path),
+            SupervisorAddress::Tcp(addr) => format!("SupervisorAddress.tcp('{addr}')"),
+            SupervisorAddress::Unix(path) => format!("SupervisorAddress.unix('{path}')"),
         }
     }
 }
@@ -62,7 +62,7 @@ impl PyRemoteSupervisorHandle {
 
         result
             .map(|inner| PyRemoteSupervisorHandle { inner })
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to connect: {}", e)))
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to connect: {e}")))
     }
 
     #[staticmethod]
@@ -74,7 +74,7 @@ impl PyRemoteSupervisorHandle {
 
         result
             .map(|inner| PyRemoteSupervisorHandle { inner })
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to connect: {}", e)))
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to connect: {e}")))
     }
 
     fn shutdown(&self, _py: Python<'_>) -> PyResult<()> {
@@ -82,7 +82,7 @@ impl PyRemoteSupervisorHandle {
         let runtime = get_runtime();
         runtime
             .block_on(async move { handle.shutdown().await })
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to shutdown: {}", e)))
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to shutdown: {e}")))
     }
 
     fn which_children(&self, _py: Python<'_>) -> PyResult<Vec<PyChildInfo>> {
@@ -106,8 +106,7 @@ impl PyRemoteSupervisorHandle {
                 Ok(py_children)
             }
             Err(e) => Err(PyRuntimeError::new_err(format!(
-                "Failed to get children: {}",
-                e
+                "Failed to get children: {e}"
             ))),
         }
     }
@@ -117,11 +116,11 @@ impl PyRemoteSupervisorHandle {
         let runtime = get_runtime();
         runtime
             .block_on(async move { handle.terminate_child(&child_id).await })
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to terminate child: {}", e)))
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to terminate child: {e}")))
     }
 
     #[allow(clippy::unused_self)]
     fn __repr__(&self) -> String {
-        "RemoteSupervisorHandle()".to_string()
+        "RemoteSupervisorHandle()".to_owned()
     }
 }

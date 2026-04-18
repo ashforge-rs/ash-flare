@@ -70,7 +70,7 @@ impl<W: Worker> fmt::Debug for WorkerSpec<W> {
         f.debug_struct("WorkerSpec")
             .field("id", &self.id)
             .field("restart_policy", &self.restart_policy)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -133,7 +133,7 @@ impl<W: Worker> WorkerProcess<W> {
     pub(crate) async fn stop(&mut self) {
         if let Some(handle) = self.handle.take() {
             handle.abort();
-            let _ = handle.await;
+            let _join_result = handle.await;
         }
     }
 }
@@ -164,13 +164,13 @@ impl fmt::Display for WorkerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WorkerError::CommandChannelClosed(name) => {
-                write!(f, "command channel to {} is closed", name)
+                write!(f, "command channel to {name} is closed")
             }
             WorkerError::WorkerPanicked(name) => {
-                write!(f, "worker {} panicked", name)
+                write!(f, "worker {name} panicked")
             }
             WorkerError::WorkerFailed(msg) => {
-                write!(f, "worker failed: {}", msg)
+                write!(f, "worker failed: {msg}")
             }
         }
     }

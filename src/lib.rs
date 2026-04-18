@@ -59,9 +59,9 @@
 //!
 //! # Restart Strategies
 //!
-//! - **OneForOne**: Restarts only the failed child (default)
-//! - **OneForAll**: Restarts all children if any child fails
-//! - **RestForOne**: Restarts the failed child and all children started after it
+//! - **`OneForOne`**: Restarts only the failed child (default)
+//! - **`OneForAll`**: Restarts all children if any child fails
+//! - **`RestForOne`**: Restarts the failed child and all children started after it
 //!
 //! # Examples
 //!

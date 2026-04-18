@@ -248,7 +248,7 @@ impl<W: Worker> Clone for StatefulSupervisorSpec<W> {
 
 impl<W: Worker> StatefulSupervisorSpec<W> {
     /// Creates a new stateful supervisor specification with the provided name.
-    /// Automatically initializes an empty WorkerContext for sharing state between workers.
+    /// Automatically initializes an empty `WorkerContext` for sharing state between workers.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -260,12 +260,14 @@ impl<W: Worker> StatefulSupervisorSpec<W> {
     }
 
     /// Sets the restart strategy for this supervisor.
+    #[must_use]
     pub fn with_restart_strategy(mut self, strategy: RestartStrategy) -> Self {
         self.restart_strategy = strategy;
         self
     }
 
     /// Sets the restart intensity for this supervisor.
+    #[must_use]
     pub fn with_restart_intensity(mut self, intensity: RestartIntensity) -> Self {
         self.restart_intensity = intensity;
         self
@@ -273,6 +275,7 @@ impl<W: Worker> StatefulSupervisorSpec<W> {
 
     /// Adds a stateful worker child to this supervisor specification.
     /// The factory function receives a `WorkerContext` parameter for accessing shared state.
+    #[must_use]
     pub fn with_worker(
         mut self,
         id: impl Into<String>,
@@ -290,13 +293,15 @@ impl<W: Worker> StatefulSupervisorSpec<W> {
     }
 
     /// Adds a nested stateful supervisor child to this supervisor specification.
+    #[must_use]
     pub fn with_supervisor(mut self, supervisor: StatefulSupervisorSpec<W>) -> Self {
         self.children
             .push(StatefulChildSpec::Supervisor(Arc::new(supervisor)));
         self
     }
 
-    /// Returns a reference to the WorkerContext for this supervisor tree.
+    /// Returns a reference to the `WorkerContext` for this supervisor tree.
+    #[must_use]
     pub fn context(&self) -> &Arc<WorkerContext> {
         &self.context
     }
@@ -333,6 +338,7 @@ impl<W: Worker> StatefulChild<W> {
     }
 
     #[inline]
+    #[allow(clippy::unnecessary_wraps)]
     pub fn restart_policy(&self) -> Option<RestartPolicy> {
         match self {
             StatefulChild::Worker(w) => Some(w.spec.restart_policy),
@@ -344,7 +350,7 @@ impl<W: Worker> StatefulChild<W> {
         match self {
             StatefulChild::Worker(w) => w.stop().await,
             StatefulChild::Supervisor { handle, .. } => {
-                let _ = handle.shutdown().await;
+                let _shutdown_result = handle.shutdown().await;
             }
         }
     }
@@ -393,34 +399,30 @@ impl fmt::Display for StatefulSupervisorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StatefulSupervisorError::NoChildren(name) => {
-                write!(f, "stateful supervisor '{}' has no children", name)
+                write!(f, "stateful supervisor '{name}' has no children")
             }
             StatefulSupervisorError::AllChildrenFailed(name) => {
                 write!(
                     f,
-                    "all children failed for stateful supervisor '{}' - restart intensity limit exceeded",
-                    name
+                    "all children failed for stateful supervisor '{name}' - restart intensity limit exceeded"
                 )
             }
             StatefulSupervisorError::ShuttingDown(name) => {
                 write!(
                     f,
-                    "stateful supervisor '{}' is shutting down - operation not permitted",
-                    name
+                    "stateful supervisor '{name}' is shutting down - operation not permitted"
                 )
             }
             StatefulSupervisorError::ChildAlreadyExists(id) => {
                 write!(
                     f,
-                    "child with id '{}' already exists - use a unique identifier",
-                    id
+                    "child with id '{id}' already exists - use a unique identifier"
                 )
             }
             StatefulSupervisorError::ChildNotFound(id) => {
                 write!(
                     f,
-                    "child with id '{}' not found - it may have already terminated",
-                    id
+                    "child with id '{id}' not found - it may have already terminated"
                 )
             }
             StatefulSupervisorError::InitializationFailed { child_id, reason } => {
@@ -429,8 +431,7 @@ impl fmt::Display for StatefulSupervisorError {
             StatefulSupervisorError::InitializationTimeout { child_id, timeout } => {
                 write!(
                     f,
-                    "child '{}' initialization timed out after {:?}",
-                    child_id, timeout
+                    "child '{child_id}' initialization timed out after {timeout:?}"
                 )
             }
         }
@@ -537,8 +538,8 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
         while let Some(command) = self.control_rx.recv().await {
             match command {
                 StatefulSupervisorCommand::StartChild { spec, respond_to } => {
-                    let result = self.handle_start_child(spec).await;
-                    let _ = respond_to.send(result);
+                    let result = self.handle_start_child(spec);
+                    let _send = respond_to.send(result);
                 }
                 StatefulSupervisorCommand::StartChildLinked {
                     spec,
@@ -546,22 +547,22 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
                     respond_to,
                 } => {
                     let result = self.handle_start_child_linked(spec, timeout).await;
-                    let _ = respond_to.send(result);
+                    let _send = respond_to.send(result);
                 }
                 StatefulSupervisorCommand::TerminateChild { id, respond_to } => {
                     let result = self.handle_terminate_child(&id).await;
-                    let _ = respond_to.send(result);
+                    let _send = respond_to.send(result);
                 }
                 StatefulSupervisorCommand::WhichChildren { respond_to } => {
                     let result = self.handle_which_children();
-                    let _ = respond_to.send(result);
+                    let _send = respond_to.send(result);
                 }
                 StatefulSupervisorCommand::GetRestartStrategy { respond_to } => {
-                    let _ = respond_to.send(self.restart_strategy);
+                    let _send = respond_to.send(self.restart_strategy);
                 }
                 StatefulSupervisorCommand::GetUptime { respond_to } => {
                     let uptime = self.created_at.elapsed().as_secs();
-                    let _ = respond_to.send(uptime);
+                    let _send = respond_to.send(uptime);
                 }
                 StatefulSupervisorCommand::ChildTerminated { id, reason } => {
                     self.handle_child_terminated(id, reason).await;
@@ -576,7 +577,7 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
         self.shutdown_children().await;
     }
 
-    async fn handle_start_child(
+    fn handle_start_child(
         &mut self,
         spec: StatefulWorkerSpec<W>,
     ) -> Result<ChildId, StatefulSupervisorError> {
@@ -692,6 +693,7 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
         Ok(())
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     fn handle_which_children(&self) -> Result<Vec<ChildInfo>, StatefulSupervisorError> {
         let info = self
             .children
@@ -706,6 +708,7 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
         Ok(info)
     }
 
+    #[allow(clippy::indexing_slicing)]
     async fn handle_child_terminated(&mut self, id: ChildId, reason: ChildExitReason) {
         tracing::debug!(
             supervisor = %self.name,
@@ -714,16 +717,13 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
             "child terminated"
         );
 
-        let position = match self.children.iter().position(|c| c.id() == id) {
-            Some(pos) => pos,
-            None => {
-                tracing::warn!(
-                    supervisor = %self.name,
-                    child = %id,
-                    "terminated child not found in list"
-                );
-                return;
-            }
+        let Some(position) = self.children.iter().position(|c| c.id() == id) else {
+            tracing::warn!(
+                supervisor = %self.name,
+                child = %id,
+                "terminated child not found in list"
+            );
+            return;
         };
 
         // Determine if we should restart based on policy and reason
@@ -772,6 +772,7 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
         }
     }
 
+    #[allow(clippy::indexing_slicing)]
     async fn restart_child(&mut self, position: usize) {
         // Extract spec info before shutdown
         let restart_info = match &self.children[position] {
@@ -855,6 +856,7 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
         }
     }
 
+    #[allow(clippy::indexing_slicing)]
     async fn restart_from(&mut self, position: usize) {
         tracing::debug!(
             supervisor = %self.name,
@@ -883,9 +885,8 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
     }
 
     async fn shutdown_children(&mut self) {
-        for child in self.children.drain(..) {
+        for mut child in self.children.drain(..) {
             let id = child.id().to_owned();
-            let mut child = child;
             child.shutdown().await;
             tracing::debug!(
                 supervisor = %self.name,
@@ -909,6 +910,7 @@ pub struct StatefulSupervisorHandle<W: Worker> {
 
 impl<W: Worker> StatefulSupervisorHandle<W> {
     /// Spawns a stateful supervisor tree based on the provided specification.
+    #[must_use]
     pub fn start(spec: StatefulSupervisorSpec<W>) -> Self {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let name_arc = Arc::new(spec.name.clone());
@@ -927,6 +929,10 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
     }
 
     /// Dynamically starts a new child worker
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor is shutting down or a child with this ID already exists.
     pub async fn start_child(
         &self,
         id: impl Into<String>,
@@ -998,6 +1004,10 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
     }
 
     /// Dynamically terminates a child
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the child is not found or the supervisor is shutting down.
     pub async fn terminate_child(&self, id: &str) -> Result<(), StatefulSupervisorError> {
         let (result_tx, result_rx) = oneshot::channel();
 
@@ -1014,6 +1024,10 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
     }
 
     /// Returns information about all children
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor is shutting down.
     pub async fn which_children(&self) -> Result<Vec<ChildInfo>, StatefulSupervisorError> {
         let (result_tx, result_rx) = oneshot::channel();
 
@@ -1029,6 +1043,11 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
     }
 
     /// Requests a graceful shutdown of the supervisor tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor channel is already closed.
+    #[allow(clippy::unused_async)]
     pub async fn shutdown(&self) -> Result<(), StatefulSupervisorError> {
         self.control_tx
             .send(StatefulSupervisorCommand::Shutdown)
@@ -1037,11 +1056,16 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
     }
 
     /// Returns the supervisor's name.
+    #[must_use]
     pub fn name(&self) -> &str {
         self.name.as_str()
     }
 
     /// Returns the supervisor's restart strategy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor is shutting down.
     pub async fn restart_strategy(&self) -> Result<RestartStrategy, StatefulSupervisorError> {
         let (result_tx, result_rx) = oneshot::channel();
 
@@ -1057,6 +1081,10 @@ impl<W: Worker> StatefulSupervisorHandle<W> {
     }
 
     /// Returns the supervisor's uptime in seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor is shutting down.
     pub async fn uptime(&self) -> Result<u64, StatefulSupervisorError> {
         let (result_tx, result_rx) = oneshot::channel();
 

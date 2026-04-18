@@ -54,9 +54,9 @@ impl PyRestartPolicy {
     #[allow(clippy::trivially_copy_pass_by_ref)]
     fn __repr__(&self) -> String {
         match self.inner {
-            RestartPolicy::Permanent => "RestartPolicy.permanent()".to_string(),
-            RestartPolicy::Temporary => "RestartPolicy.temporary()".to_string(),
-            RestartPolicy::Transient => "RestartPolicy.transient()".to_string(),
+            RestartPolicy::Permanent => "RestartPolicy.permanent()".to_owned(),
+            RestartPolicy::Temporary => "RestartPolicy.temporary()".to_owned(),
+            RestartPolicy::Transient => "RestartPolicy.transient()".to_owned(),
         }
     }
 }
@@ -109,9 +109,9 @@ impl PyRestartStrategy {
     #[allow(clippy::trivially_copy_pass_by_ref)]
     fn __repr__(&self) -> String {
         match self.inner {
-            RestartStrategy::OneForOne => "RestartStrategy.one_for_one()".to_string(),
-            RestartStrategy::OneForAll => "RestartStrategy.one_for_all()".to_string(),
-            RestartStrategy::RestForOne => "RestartStrategy.rest_for_one()".to_string(),
+            RestartStrategy::OneForOne => "RestartStrategy.one_for_one()".to_owned(),
+            RestartStrategy::OneForAll => "RestartStrategy.one_for_all()".to_owned(),
+            RestartStrategy::RestForOne => "RestartStrategy.rest_for_one()".to_owned(),
         }
     }
 }
@@ -128,7 +128,7 @@ impl PyRestartIntensity {
     #[new]
     fn new(max_restarts: u32, time_window_secs: u64) -> Self {
         let inner = RestartIntensity {
-            max_restarts: max_restarts as usize,
+            max_restarts: usize::try_from(max_restarts).unwrap_or(usize::MAX),
             within_seconds: time_window_secs,
         };
         PyRestartIntensity { inner }
@@ -136,7 +136,7 @@ impl PyRestartIntensity {
 
     #[getter]
     fn max_restarts(&self) -> u32 {
-        self.inner.max_restarts as u32
+        u32::try_from(self.inner.max_restarts).unwrap_or(u32::MAX)
     }
 
     #[getter]
@@ -163,8 +163,8 @@ pub struct PyChildType {
 impl PyChildType {
     fn __repr__(&self) -> String {
         match self.inner {
-            ChildType::Worker => "ChildType.Worker".to_string(),
-            ChildType::Supervisor => "ChildType.Supervisor".to_string(),
+            ChildType::Worker => "ChildType.Worker".to_owned(),
+            ChildType::Supervisor => "ChildType.Supervisor".to_owned(),
         }
     }
 
@@ -189,9 +189,9 @@ pub struct PyChildExitReason {
 impl PyChildExitReason {
     fn __repr__(&self) -> String {
         match self.inner {
-            ChildExitReason::Normal => "ChildExitReason.Normal".to_string(),
-            ChildExitReason::Abnormal => "ChildExitReason.Abnormal".to_string(),
-            ChildExitReason::Shutdown => "ChildExitReason.Shutdown".to_string(),
+            ChildExitReason::Normal => "ChildExitReason.Normal".to_owned(),
+            ChildExitReason::Abnormal => "ChildExitReason.Abnormal".to_owned(),
+            ChildExitReason::Shutdown => "ChildExitReason.Shutdown".to_owned(),
         }
     }
 

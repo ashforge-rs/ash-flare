@@ -20,14 +20,14 @@ pub(crate) async fn run_worker<W: Worker, Cmd>(
 ) where
     Cmd: From<WorkerTermination>,
 {
-    let qualified_name = format!("{}/{}", supervisor_name, worker_id);
+    let qualified_name = format!("{supervisor_name}/{worker_id}");
 
     // Initialize the worker
     match worker.initialize().await {
         Ok(()) => {
             // Send initialization success confirmation if linked
             if let Some(tx) = init_tx {
-                let _ = tx.send(Ok(()));
+                let _send = tx.send(Ok(()));
             }
         }
         Err(err) => {
@@ -38,9 +38,9 @@ pub(crate) async fn run_worker<W: Worker, Cmd>(
             );
             // Send initialization failure if linked
             if let Some(tx) = init_tx {
-                let _ = tx.send(Err(err.to_string()));
+                let _send = tx.send(Err(err.to_string()));
             }
-            let _ = control_tx.send(
+            let _send = control_tx.send(
                 WorkerTermination {
                     id: worker_id,
                     reason: ChildExitReason::Abnormal,
@@ -81,7 +81,7 @@ pub(crate) async fn run_worker<W: Worker, Cmd>(
     tracing::debug!(worker = %qualified_name, "worker stopped");
 
     // Notify supervisor of termination
-    let _ = control_tx.send(
+    let _send = control_tx.send(
         WorkerTermination {
             id: worker_id,
             reason: exit_reason,

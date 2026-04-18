@@ -37,8 +37,8 @@ impl PyMailboxConfig {
 
     fn __repr__(&self) -> String {
         match self.inner {
-            MailboxConfig::Unbounded => "MailboxConfig.unbounded()".to_string(),
-            MailboxConfig::Bounded { capacity } => format!("MailboxConfig.bounded({})", capacity),
+            MailboxConfig::Unbounded => "MailboxConfig.unbounded()".to_owned(),
+            MailboxConfig::Bounded { capacity } => format!("MailboxConfig.bounded({capacity})"),
         }
     }
 }
@@ -58,14 +58,14 @@ impl PyMailboxHandle {
             handle
                 .send(message)
                 .await
-                .map_err(|e| PyRuntimeError::new_err(format!("Failed to send: {}", e)))
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to send: {e}")))
         })
     }
 
     fn try_send(&self, message: String) -> PyResult<()> {
         self.inner
             .try_send(message)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to send: {}", e)))
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to send: {e}")))
     }
 
     fn worker_id(&self) -> &str {
@@ -89,20 +89,20 @@ pub struct PyMailbox {
 
 #[pymethods]
 impl PyMailbox {
-    fn recv(&mut self, _py: Python<'_>) -> PyResult<Option<String>> {
+    fn recv(&mut self, _py: Python<'_>) -> Option<String> {
         let runtime = get_runtime();
-        Ok(runtime.block_on(async move { self.inner.recv().await }))
+        runtime.block_on(async move { self.inner.recv().await })
     }
 
     fn try_recv(&mut self) -> PyResult<String> {
         self.inner
             .try_recv()
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to receive: {}", e)))
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to receive: {e}")))
     }
 
     #[allow(clippy::unused_self)]
     fn __repr__(&self) -> String {
-        "Mailbox()".to_string()
+        "Mailbox()".to_owned()
     }
 }
 

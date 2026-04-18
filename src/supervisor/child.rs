@@ -34,6 +34,7 @@ impl<W: Worker> Child<W> {
     }
 
     #[inline]
+    #[allow(clippy::unnecessary_wraps)]
     pub fn restart_policy(&self) -> Option<RestartPolicy> {
         match self {
             Child::Worker(w) => Some(w.spec.restart_policy),
@@ -45,7 +46,7 @@ impl<W: Worker> Child<W> {
         match self {
             Child::Worker(w) => w.stop().await,
             Child::Supervisor { handle, .. } => {
-                let _ = handle.shutdown().await;
+                let _shutdown_result = handle.shutdown().await;
             }
         }
     }

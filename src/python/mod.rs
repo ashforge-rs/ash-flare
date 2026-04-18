@@ -1,10 +1,10 @@
-//! Python bindings for ash-flare using PyO3
+//! Python bindings for ash-flare using `PyO3`
 //!
 //! This module provides comprehensive Python bindings for the ash-flare supervision library.
 //! The bindings are organized into several submodules:
 //!
 //! - `types` - Basic restart and child types
-//! - `context` - WorkerContext for stateful workers
+//! - `context` - `WorkerContext` for stateful workers
 //! - `mailbox` - Message-passing system
 //! - `worker` - Worker implementation
 //! - `supervisor` - Regular supervisor

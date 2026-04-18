@@ -110,23 +110,38 @@ pub struct RemoteSupervisorHandle {
 
 impl RemoteSupervisorHandle {
     /// Create a new handle to a remote supervisor
+    #[must_use]
     pub fn new(address: SupervisorAddress) -> Self {
         Self { address }
     }
 
     /// Connect to a TCP supervisor
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the address is invalid.
+    #[allow(clippy::unused_async)]
     pub async fn connect_tcp(addr: impl Into<String>) -> Result<Self, DistributedError> {
         let address = SupervisorAddress::Tcp(addr.into());
         Ok(Self { address })
     }
 
     /// Connect to a Unix socket supervisor
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path is invalid.
+    #[allow(clippy::unused_async)]
     pub async fn connect_unix(path: impl Into<String>) -> Result<Self, DistributedError> {
         let address = SupervisorAddress::Unix(path.into());
         Ok(Self { address })
     }
 
     /// Send a command to the remote supervisor
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection fails or the command cannot be serialized.
     pub async fn send_command(
         &self,
         cmd: RemoteCommand,
@@ -152,12 +167,20 @@ impl RemoteSupervisorHandle {
     }
 
     /// Shutdown the remote supervisor
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the remote connection fails.
     pub async fn shutdown(&self) -> Result<(), DistributedError> {
         self.send_command(RemoteCommand::Shutdown).await?;
         Ok(())
     }
 
     /// Get list of children from remote supervisor
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the remote connection fails or returns an unexpected response.
     pub async fn which_children(&self) -> Result<Vec<ChildInfo>, DistributedError> {
         match self.send_command(RemoteCommand::WhichChildren).await? {
             RemoteResponse::Children(children) => Ok(children),
@@ -167,6 +190,10 @@ impl RemoteSupervisorHandle {
     }
 
     /// Terminate a child on the remote supervisor
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the remote connection fails or returns an unexpected response.
     pub async fn terminate_child(&self, id: &str) -> Result<(), DistributedError> {
         match self
             .send_command(RemoteCommand::TerminateChild { id: id.to_owned() })
@@ -179,6 +206,10 @@ impl RemoteSupervisorHandle {
     }
 
     /// Get status from remote supervisor
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the remote connection fails or returns an unexpected response.
     pub async fn status(&self) -> Result<SupervisorStatus, DistributedError> {
         match self.send_command(RemoteCommand::Status).await? {
             RemoteResponse::Status(status) => Ok(status),
@@ -188,13 +219,14 @@ impl RemoteSupervisorHandle {
     }
 }
 
-/// Server that wraps a SupervisorHandle and accepts remote commands
+/// Server that wraps a `SupervisorHandle` and accepts remote commands
 pub struct SupervisorServer<W: Worker> {
     handle: Arc<SupervisorHandle<W>>,
 }
 
 impl<W: Worker> SupervisorServer<W> {
-    /// Create a new supervisor server wrapping a SupervisorHandle
+    /// Create a new supervisor server wrapping a `SupervisorHandle`
+    #[must_use]
     pub fn new(handle: SupervisorHandle<W>) -> Self {
         Self {
             handle: Arc::new(handle),
@@ -202,16 +234,20 @@ impl<W: Worker> SupervisorServer<W> {
     }
 
     /// Start listening on a Unix socket (Unix only)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the socket cannot be bound or a connection fails.
     #[cfg(unix)]
     pub async fn listen_unix(
         self,
         path: impl AsRef<std::path::Path>,
     ) -> Result<(), DistributedError> {
-        let path = path.as_ref();
-        let _ = std::fs::remove_file(path); // Clean up old socket
+        let socket_path = path.as_ref();
+        let _remove_result = std::fs::remove_file(socket_path); // Clean up old socket
 
-        let listener = UnixListener::bind(path)?;
-        tracing::info!(path = %path.display(), "server listening on unix socket");
+        let listener = UnixListener::bind(socket_path)?;
+        tracing::info!(path = %socket_path.display(), "server listening on unix socket");
 
         loop {
             let (mut stream, _) = listener.accept().await?;
@@ -226,6 +262,10 @@ impl<W: Worker> SupervisorServer<W> {
     }
 
     /// Start listening on a TCP socket
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the socket cannot be bound or a connection fails.
     pub async fn listen_tcp(self, addr: impl AsRef<str>) -> Result<(), DistributedError> {
         let listener = TcpListener::bind(addr.as_ref()).await?;
         tracing::info!(address = addr.as_ref(), "server listening on tcp");
@@ -267,8 +307,8 @@ impl<W: Worker> SupervisorServer<W> {
             },
             RemoteCommand::WhichChildren => match handle.which_children().await {
                 Ok(children) => {
-                    let children: Vec<ChildInfo> = children.into_iter().map(Into::into).collect();
-                    RemoteResponse::Children(children)
+                    let child_list: Vec<ChildInfo> = children.into_iter().map(Into::into).collect();
+                    RemoteResponse::Children(child_list)
                 }
                 Err(e) => RemoteResponse::Error(e.to_string()),
             },
@@ -280,8 +320,7 @@ impl<W: Worker> SupervisorServer<W> {
                 let restart_strategy = handle
                     .restart_strategy()
                     .await
-                    .map(|s| format!("{:?}", s))
-                    .unwrap_or_else(|_| "Unknown".to_owned());
+                    .map_or_else(|_| "Unknown".to_owned(), |s| format!("{s:?}"));
                 let uptime_secs = handle.uptime().await.unwrap_or(0);
 
                 RemoteResponse::Status(SupervisorStatus {
@@ -309,7 +348,8 @@ where
     >,
 {
     let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(msg)?;
-    let len = encoded.len() as u32;
+    let len = u32::try_from(encoded.len())
+        .map_err(|_| DistributedError::MessageTooLarge(encoded.len()))?;
 
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(&encoded).await?;
@@ -319,6 +359,7 @@ where
 }
 
 /// Receive a message from a stream (length-prefixed rkyv)
+#[allow(clippy::as_conversions)]
 async fn receive_message<S, T>(stream: &mut S) -> Result<T, DistributedError>
 where
     S: AsyncReadExt + Unpin,
@@ -361,13 +402,13 @@ pub enum DistributedError {
 impl fmt::Display for DistributedError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DistributedError::Io(e) => write!(f, "IO error: {}", e),
-            DistributedError::Encode(e) => write!(f, "Encode error: {}", e),
-            DistributedError::Decode(e) => write!(f, "Decode error: {}", e),
-            DistributedError::RemoteError(e) => write!(f, "Remote error: {}", e),
+            DistributedError::Io(e) => write!(f, "IO error: {e}"),
+            DistributedError::Encode(e) => write!(f, "Encode error: {e}"),
+            DistributedError::Decode(e) => write!(f, "Decode error: {e}"),
+            DistributedError::RemoteError(e) => write!(f, "Remote error: {e}"),
             DistributedError::UnexpectedResponse => write!(f, "Unexpected response from remote"),
             DistributedError::MessageTooLarge(size) => {
-                write!(f, "Message too large: {} bytes", size)
+                write!(f, "Message too large: {size} bytes")
             }
         }
     }

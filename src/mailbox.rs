@@ -25,11 +25,16 @@ impl Default for MailboxConfig {
 
 impl MailboxConfig {
     /// Create unbounded mailbox configuration
+    #[must_use]
     pub const fn unbounded() -> Self {
         Self::Unbounded
     }
 
     /// Create bounded mailbox configuration
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is 0.
     #[must_use]
     pub fn bounded(capacity: usize) -> Self {
         assert!(capacity > 0, "mailbox capacity must be > 0");

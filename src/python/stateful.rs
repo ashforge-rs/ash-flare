@@ -33,14 +33,12 @@ impl PyStatefulSupervisorSpec {
         }
     }
 
-    fn with_restart_strategy(&mut self, strategy: PyRestartStrategy) -> PyResult<()> {
+    fn with_restart_strategy(&mut self, strategy: PyRestartStrategy) {
         self.inner.restart_strategy = strategy.inner;
-        Ok(())
     }
 
-    fn with_restart_intensity(&mut self, intensity: &PyRestartIntensity) -> PyResult<()> {
+    fn with_restart_intensity(&mut self, intensity: &PyRestartIntensity) {
         self.inner.restart_intensity = intensity.inner;
-        Ok(())
     }
 
     fn context(&self) -> PyWorkerContext {
@@ -57,7 +55,7 @@ impl PyStatefulSupervisorSpec {
         id: String,
         restart_policy: PyRestartPolicy,
         worker_fn: Py<PyAny>,
-    ) -> PyResult<()> {
+    ) {
         let policy = restart_policy.inner;
         let id_clone = id.clone();
         let worker_fn_arc = Arc::new(worker_fn.clone_ref(py));
@@ -71,14 +69,11 @@ impl PyStatefulSupervisorSpec {
                 },
                 policy,
             );
-
-        Ok(())
     }
 
-    fn add_supervisor(&mut self, supervisor: &PyStatefulSupervisorSpec) -> PyResult<()> {
+    fn add_supervisor(&mut self, supervisor: &PyStatefulSupervisorSpec) {
         self.inner = std::mem::replace(&mut self.inner, StatefulSupervisorSpec::new("temp"))
             .with_supervisor(supervisor.inner.clone());
-        Ok(())
     }
 }
 
@@ -100,7 +95,7 @@ impl PyStatefulSupervisorHandle {
     }
 
     fn name(&self) -> String {
-        self.inner.name().to_string()
+        self.inner.name().to_owned()
     }
 
     fn which_children(&self, _py: Python<'_>) -> PyResult<Vec<PyChildInfo>> {
@@ -111,8 +106,7 @@ impl PyStatefulSupervisorHandle {
         match result {
             Ok(children) => Ok(children.into_iter().map(PyChildInfo::from).collect()),
             Err(e) => Err(PyRuntimeError::new_err(format!(
-                "Failed to get children: {}",
-                e
+                "Failed to get children: {e}"
             ))),
         }
     }
@@ -138,8 +132,7 @@ impl PyStatefulSupervisorHandle {
                 Ok(dict.into())
             }
             Err(e) => Err(PyRuntimeError::new_err(format!(
-                "Failed to count children: {}",
-                e
+                "Failed to count children: {e}"
             ))),
         }
     }
@@ -149,7 +142,7 @@ impl PyStatefulSupervisorHandle {
         let runtime = get_runtime();
         let result = runtime.block_on(async move { handle.terminate_child(&child_id).await });
 
-        result.map_err(|e| PyRuntimeError::new_err(format!("Failed to terminate child: {}", e)))
+        result.map_err(|e| PyRuntimeError::new_err(format!("Failed to terminate child: {e}")))
     }
 
     fn shutdown(&self, _py: Python<'_>) -> PyResult<()> {
@@ -157,7 +150,7 @@ impl PyStatefulSupervisorHandle {
         let runtime = get_runtime();
         let result = runtime.block_on(async move { handle.shutdown().await });
 
-        result.map_err(|e| PyRuntimeError::new_err(format!("Failed to shutdown: {}", e)))
+        result.map_err(|e| PyRuntimeError::new_err(format!("Failed to shutdown: {e}")))
     }
 
     fn __repr__(&self) -> String {

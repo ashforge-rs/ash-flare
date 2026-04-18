@@ -18,6 +18,7 @@ pub struct SupervisorHandle<W: Worker> {
 
 impl<W: Worker> SupervisorHandle<W> {
     /// Spawns a supervisor tree based on the provided specification.
+    #[must_use]
     pub fn start(spec: SupervisorSpec<W>) -> Self {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let name_arc = Arc::new(spec.name.clone());
@@ -36,6 +37,10 @@ impl<W: Worker> SupervisorHandle<W> {
     }
 
     /// Dynamically starts a new child worker
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor is shutting down or a child with this ID already exists.
     pub async fn start_child(
         &self,
         id: impl Into<String>,
@@ -104,6 +109,10 @@ impl<W: Worker> SupervisorHandle<W> {
     }
 
     /// Dynamically terminates a child
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the child is not found or the supervisor is shutting down.
     pub async fn terminate_child(&self, id: &str) -> Result<(), SupervisorError> {
         let (result_tx, result_rx) = oneshot::channel();
 
@@ -120,6 +129,10 @@ impl<W: Worker> SupervisorHandle<W> {
     }
 
     /// Returns information about all children
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor is shutting down.
     pub async fn which_children(&self) -> Result<Vec<ChildInfo>, SupervisorError> {
         let (result_tx, result_rx) = oneshot::channel();
 
@@ -135,6 +148,11 @@ impl<W: Worker> SupervisorHandle<W> {
     }
 
     /// Requests a graceful shutdown of the supervisor tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor channel is already closed.
+    #[allow(clippy::unused_async)]
     pub async fn shutdown(&self) -> Result<(), SupervisorError> {
         self.control_tx
             .send(SupervisorCommand::Shutdown)
@@ -143,11 +161,16 @@ impl<W: Worker> SupervisorHandle<W> {
     }
 
     /// Returns the supervisor's name.
+    #[must_use]
     pub fn name(&self) -> &str {
         self.name.as_str()
     }
 
     /// Returns the supervisor's restart strategy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor is shutting down.
     pub async fn restart_strategy(
         &self,
     ) -> Result<crate::restart::RestartStrategy, SupervisorError> {
@@ -165,6 +188,10 @@ impl<W: Worker> SupervisorHandle<W> {
     }
 
     /// Returns the supervisor's uptime in seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor is shutting down.
     pub async fn uptime(&self) -> Result<u64, SupervisorError> {
         let (result_tx, result_rx) = oneshot::channel();
 

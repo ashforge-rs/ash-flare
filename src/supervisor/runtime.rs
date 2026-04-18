@@ -101,8 +101,8 @@ impl<W: Worker> SupervisorRuntime<W> {
         while let Some(command) = self.control_rx.recv().await {
             match command {
                 SupervisorCommand::StartChild { spec, respond_to } => {
-                    let result = self.handle_start_child(spec).await;
-                    let _ = respond_to.send(result);
+                    let result = self.handle_start_child(spec);
+                    let _send = respond_to.send(result);
                 }
                 SupervisorCommand::StartChildLinked {
                     spec,
@@ -110,22 +110,22 @@ impl<W: Worker> SupervisorRuntime<W> {
                     respond_to,
                 } => {
                     let result = self.handle_start_child_linked(spec, timeout).await;
-                    let _ = respond_to.send(result);
+                    let _send = respond_to.send(result);
                 }
                 SupervisorCommand::TerminateChild { id, respond_to } => {
                     let result = self.handle_terminate_child(&id).await;
-                    let _ = respond_to.send(result);
+                    let _send = respond_to.send(result);
                 }
                 SupervisorCommand::WhichChildren { respond_to } => {
                     let result = self.handle_which_children();
-                    let _ = respond_to.send(result);
+                    let _send = respond_to.send(result);
                 }
                 SupervisorCommand::GetRestartStrategy { respond_to } => {
-                    let _ = respond_to.send(self.restart_strategy);
+                    let _send = respond_to.send(self.restart_strategy);
                 }
                 SupervisorCommand::GetUptime { respond_to } => {
                     let uptime = self.created_at.elapsed().as_secs();
-                    let _ = respond_to.send(uptime);
+                    let _send = respond_to.send(uptime);
                 }
                 SupervisorCommand::ChildTerminated { id, reason } => {
                     self.handle_child_terminated(id, reason).await;
@@ -140,10 +140,7 @@ impl<W: Worker> SupervisorRuntime<W> {
         self.shutdown_children().await;
     }
 
-    async fn handle_start_child(
-        &mut self,
-        spec: WorkerSpec<W>,
-    ) -> Result<ChildId, SupervisorError> {
+    fn handle_start_child(&mut self, spec: WorkerSpec<W>) -> Result<ChildId, SupervisorError> {
         // Check if child with same ID already exists
         if self.children.iter().any(|c| c.id() == spec.id) {
             return Err(SupervisorError::ChildAlreadyExists(spec.id.clone()));
@@ -256,6 +253,7 @@ impl<W: Worker> SupervisorRuntime<W> {
         Ok(())
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     fn handle_which_children(&self) -> Result<Vec<ChildInfo>, SupervisorError> {
         let info = self
             .children
@@ -270,6 +268,7 @@ impl<W: Worker> SupervisorRuntime<W> {
         Ok(info)
     }
 
+    #[allow(clippy::indexing_slicing)]
     async fn handle_child_terminated(&mut self, id: ChildId, reason: ChildExitReason) {
         tracing::debug!(
             supervisor = %self.name,
@@ -278,16 +277,13 @@ impl<W: Worker> SupervisorRuntime<W> {
             "child terminated"
         );
 
-        let position = match self.children.iter().position(|c| c.id() == id) {
-            Some(pos) => pos,
-            None => {
-                tracing::warn!(
-                    supervisor = %self.name,
-                    child = %id,
-                    "terminated child not found in list"
-                );
-                return;
-            }
+        let Some(position) = self.children.iter().position(|c| c.id() == id) else {
+            tracing::warn!(
+                supervisor = %self.name,
+                child = %id,
+                "terminated child not found in list"
+            );
+            return;
         };
 
         // Determine if we should restart based on policy and reason
@@ -336,6 +332,7 @@ impl<W: Worker> SupervisorRuntime<W> {
         }
     }
 
+    #[allow(clippy::indexing_slicing)]
     async fn restart_child(&mut self, position: usize) {
         // Extract spec info before shutdown
         let restart_info = match &self.children[position] {
@@ -411,6 +408,7 @@ impl<W: Worker> SupervisorRuntime<W> {
         }
     }
 
+    #[allow(clippy::indexing_slicing)]
     async fn restart_from(&mut self, position: usize) {
         tracing::debug!(
             supervisor = %self.name,
@@ -436,9 +434,8 @@ impl<W: Worker> SupervisorRuntime<W> {
     }
 
     async fn shutdown_children(&mut self) {
-        for child in self.children.drain(..) {
+        for mut child in self.children.drain(..) {
             let id = child.id().to_owned();
-            let mut child = child;
             child.shutdown().await;
             tracing::debug!(
                 supervisor = %self.name,
