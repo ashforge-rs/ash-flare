@@ -115,6 +115,8 @@ bump-version:
 	@echo "Bumping version to $(VERSION)..."
 	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' Cargo.toml
 	@rm -f Cargo.toml.bak
+	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' pyproject.toml
+	@rm -f pyproject.toml.bak
 	@echo "✓ Updated version to $(VERSION)"
 
 # Release process
