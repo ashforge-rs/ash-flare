@@ -24,10 +24,17 @@ cargo add ash-flare
 Install from [GitHub Releases](https://github.com/ashforge-rs/ash-flare/releases):
 
 ```bash
-uv add "ash-flare @ https://github.com/ashforge-rs/ash-flare/releases/latest/download/ash_flare-2.0.0-cp39-abi3-linux_x86_64.whl"
+# Find the wheel for your platform on the releases page, then:
+uv add "ash-flare @ https://github.com/ashforge-rs/ash-flare/releases/download/vVERSION/ash_flare-VERSION-cp39-abi3-PLATFORM.whl"
 ```
 
-> Replace the wheel filename with the appropriate version and platform from the [releases page](https://github.com/ashforge-rs/ash-flare/releases)
+For example, on Linux x86_64 with version 2.2.0:
+
+```bash
+uv add "ash-flare @ https://github.com/ashforge-rs/ash-flare/releases/download/v2.2.0/ash_flare-2.2.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+```
+
+> Check the [releases page](https://github.com/ashforge-rs/ash-flare/releases) for the exact wheel filename matching your version and platform.
 
 ## Quick Start
 
