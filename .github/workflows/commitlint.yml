@@ -17,6 +17,9 @@ jobs:
     if: github.base_ref == 'master' || github.base_ref == 'main'
     
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -25,13 +28,10 @@ jobs:
       - name: Install commitlint
         run: npm install --save-dev @commitlint/cli@latest @commitlint/config-conventional@latest
       
-      - name: Create commitlint config
-        run: 'echo "module.exports = { extends: [''@commitlint/config-conventional''] };" > commitlint.config.js'
-      
       - name: Validate PR title
         id: commitlint
         continue-on-error: true
-        run: echo "${{ github.event.pull_request.title }}" | npx commitlint --verbose
+        run: echo "${{ github.event.pull_request.title }}" | npx commitlint --config .commitlintrc.json --verbose
       
       - name: Add warning label
         if: steps.commitlint.outcome != 'success'
