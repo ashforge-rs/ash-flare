@@ -16,7 +16,7 @@ use crate::types::ChildType;
 use super::context::PyWorkerContext;
 use super::types::{PyChildInfo, PyRestartIntensity, PyRestartPolicy, PyRestartStrategy};
 use super::worker::PyWorker;
-use super::{block_on_without_gil, ensure_callable, get_runtime};
+use super::{block_on_without_gil, duration_from_secs, ensure_callable, get_runtime};
 
 /// Python-facing stateful supervisor specification
 #[pyclass(name = "StatefulSupervisorSpec")]
@@ -48,10 +48,11 @@ impl PyStatefulSupervisorSpec {
     }
 
     /// Sets how long a worker may take to stop before it is abandoned.
-    fn with_shutdown_timeout(&mut self, seconds: f64) {
-        let timeout = std::time::Duration::try_from_secs_f64(seconds).unwrap_or_default();
+    fn with_shutdown_timeout(&mut self, seconds: f64) -> PyResult<()> {
+        let timeout = duration_from_secs(seconds, "shutdown timeout")?;
         self.inner = std::mem::replace(&mut self.inner, StatefulSupervisorSpec::new("temp"))
             .with_shutdown_timeout(timeout);
+        Ok(())
     }
 
     /// Registers a worker.

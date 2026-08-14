@@ -217,34 +217,124 @@ impl RestartTracker {
     }
 }
 
+/// Per-child backoff bookkeeping.
+#[derive(Debug)]
+struct BackoffState {
+    /// Consecutive restarts, used as the exponent for the next delay.
+    attempts: u32,
+    /// When the child spawned by the most recent restart began running. The
+    /// backoff is applied before the child is respawned, so this is the time the
+    /// decision was taken plus that delay.
+    started_at: Instant,
+}
+
 /// Tracks consecutive restarts per child so backoff grows for a child that
 /// keeps failing and resets once it has run long enough to be considered healthy.
 #[derive(Debug)]
 pub(crate) struct BackoffTracker {
     backoff: RestartBackoff,
-    /// Consecutive restart count keyed by child id.
-    attempts: std::collections::HashMap<String, u32>,
+    /// Backoff state keyed by child id.
+    state: std::collections::HashMap<String, BackoffState>,
 }
 
 impl BackoffTracker {
     pub(crate) fn new(backoff: RestartBackoff) -> Self {
         Self {
             backoff,
-            attempts: std::collections::HashMap::new(),
+            state: std::collections::HashMap::new(),
         }
     }
 
     /// Records a restart for `id` and returns the delay to wait beforehand.
+    ///
+    /// A child that stayed up for at least `max_delay` since its last restart is
+    /// considered healthy and starts again from `initial_delay`. Without this a
+    /// child that fails once an hour eventually inherits the ceiling delay from
+    /// crashes that are long past.
     pub(crate) fn next_delay(&mut self, id: &str) -> Duration {
-        let attempt = self.attempts.entry(id.to_owned()).or_insert(0);
-        let delay = self.backoff.delay_for_attempt(*attempt);
-        *attempt = attempt.saturating_add(1);
+        let now = Instant::now();
+        let healthy_after = self.backoff.max_delay;
+
+        let state = self
+            .state
+            .entry(id.to_owned())
+            .or_insert_with(|| BackoffState {
+                attempts: 0,
+                started_at: now,
+            });
+
+        if now.saturating_duration_since(state.started_at) >= healthy_after {
+            state.attempts = 0;
+        }
+
+        let delay = self.backoff.delay_for_attempt(state.attempts);
+        state.attempts = state.attempts.saturating_add(1);
+        // The replacement child only starts once the backoff elapses; measuring
+        // uptime from then is what makes "has it been healthy" meaningful.
+        state.started_at = now.checked_add(delay).unwrap_or(now);
         delay
     }
 
     /// Clears the consecutive-restart count for `id`, so the next failure starts
     /// from the initial delay again.
     pub(crate) fn reset_child(&mut self, id: &str) {
-        self.attempts.remove(id);
+        self.state.remove(id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BackoffTracker, RestartBackoff};
+    use std::time::Duration;
+
+    #[test]
+    fn consecutive_failures_grow_the_delay() {
+        let mut tracker = BackoffTracker::new(RestartBackoff::exponential(
+            Duration::from_millis(100),
+            Duration::from_secs(30),
+        ));
+
+        assert_eq!(tracker.next_delay("a"), Duration::from_millis(100));
+        assert_eq!(tracker.next_delay("a"), Duration::from_millis(200));
+        assert_eq!(tracker.next_delay("a"), Duration::from_millis(400));
+    }
+
+    #[tokio::test]
+    async fn a_child_that_stayed_up_starts_over_from_the_initial_delay() {
+        // A 20ms ceiling means "up for 20ms" counts as healthy here; the real
+        // default is 30s.
+        let mut tracker = BackoffTracker::new(RestartBackoff::exponential(
+            Duration::from_millis(5),
+            Duration::from_millis(20),
+        ));
+
+        assert_eq!(tracker.next_delay("a"), Duration::from_millis(5));
+        assert_eq!(tracker.next_delay("a"), Duration::from_millis(10));
+
+        // The child now runs healthily for longer than the ceiling.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        assert_eq!(
+            tracker.next_delay("a"),
+            Duration::from_millis(5),
+            "an occasional failure must not inherit an old crash loop's backoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_crash_looping_child_keeps_backing_off() {
+        let mut tracker = BackoffTracker::new(RestartBackoff::exponential(
+            Duration::from_millis(5),
+            Duration::from_secs(30),
+        ));
+
+        assert_eq!(tracker.next_delay("a"), Duration::from_millis(5));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert_eq!(
+            tracker.next_delay("a"),
+            Duration::from_millis(10),
+            "uptime well under the ceiling is not healthy"
+        );
     }
 }

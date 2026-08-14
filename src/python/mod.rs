@@ -53,6 +53,20 @@ where
     py.detach(|| get_runtime().block_on(future))
 }
 
+/// Converts a Python `float` of seconds into a `Duration`, rejecting values a
+/// `Duration` cannot represent.
+///
+/// Silently coercing them to `Duration::ZERO` would turn a typo such as
+/// `with_shutdown_timeout(-1)` into "abort every worker immediately, skipping
+/// its shutdown hook" with no indication anything was wrong.
+pub(crate) fn duration_from_secs(seconds: f64, setting: &str) -> PyResult<std::time::Duration> {
+    std::time::Duration::try_from_secs_f64(seconds).map_err(|_e| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "{setting} must be a finite, non-negative number of seconds, got {seconds}"
+        ))
+    })
+}
+
 /// Rejects a worker argument that is not callable, instead of accepting it and
 /// failing silently later when the supervisor tries to invoke it.
 pub(crate) fn ensure_callable(py: Python<'_>, obj: &Py<PyAny>, id: &str) -> PyResult<()> {

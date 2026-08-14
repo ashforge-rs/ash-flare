@@ -16,7 +16,7 @@ use crate::types::ChildType;
 
 use super::types::{PyChildInfo, PyRestartIntensity, PyRestartPolicy, PyRestartStrategy};
 use super::worker::PyWorker;
-use super::{block_on_without_gil, ensure_callable, get_runtime};
+use super::{block_on_without_gil, duration_from_secs, ensure_callable, get_runtime};
 
 /// Rejects a duplicate child id at registration time.
 ///
@@ -57,24 +57,27 @@ impl PySupervisorSpec {
 
     /// Sets a fixed delay, in seconds, between a child terminating and being
     /// restarted. Prevents a crash-looping child from saturating a CPU core.
-    fn with_restart_delay(&mut self, seconds: f64) {
-        let delay = std::time::Duration::try_from_secs_f64(seconds).unwrap_or_default();
+    fn with_restart_delay(&mut self, seconds: f64) -> PyResult<()> {
+        let delay = duration_from_secs(seconds, "restart delay")?;
         self.inner.restart_backoff = crate::RestartBackoff::exponential(delay, delay);
+        Ok(())
     }
 
     /// Sets an exponential restart backoff, in seconds, starting at
     /// `initial_seconds` and doubling up to `max_seconds`.
-    fn with_restart_backoff(&mut self, initial_seconds: f64, max_seconds: f64) {
-        let initial = std::time::Duration::try_from_secs_f64(initial_seconds).unwrap_or_default();
-        let max = std::time::Duration::try_from_secs_f64(max_seconds).unwrap_or_default();
+    fn with_restart_backoff(&mut self, initial_seconds: f64, max_seconds: f64) -> PyResult<()> {
+        let initial = duration_from_secs(initial_seconds, "initial restart backoff")?;
+        let max = duration_from_secs(max_seconds, "maximum restart backoff")?;
         self.inner.restart_backoff = crate::RestartBackoff::exponential(initial, max);
+        Ok(())
     }
 
     /// Sets how long a worker may take to stop before it is abandoned.
-    fn with_shutdown_timeout(&mut self, seconds: f64) {
-        let timeout = Duration::try_from_secs_f64(seconds).unwrap_or_default();
+    fn with_shutdown_timeout(&mut self, seconds: f64) -> PyResult<()> {
+        let timeout = duration_from_secs(seconds, "shutdown timeout")?;
         self.inner = std::mem::replace(&mut self.inner, SupervisorSpec::new("temp"))
             .with_shutdown_timeout(timeout);
+        Ok(())
     }
 
     #[pyo3(signature = (id, restart_policy, worker_fn))]
@@ -230,14 +233,10 @@ impl PySupervisorHandle {
 
         let result = block_on_without_gil(py, async move {
             handle
-                .start_child_linked(
+                .start_child_linked_with_signal(
                     id,
-                    move || {
-                        PyWorker::new(
-                            id_clone.clone(),
-                            Arc::clone(&worker_fn_arc),
-                            crate::ShutdownSignal::never(),
-                        )
+                    move |signal| {
+                        PyWorker::new(id_clone.clone(), Arc::clone(&worker_fn_arc), signal)
                     },
                     policy,
                     timeout,

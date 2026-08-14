@@ -37,6 +37,9 @@ impl<W: Worker> Clone for SupervisorSpec<W> {
     }
 }
 
+// Only the Python bindings validate ids at registration time; the Rust builder
+// leaves duplicate detection to `start_child`.
+#[cfg(feature = "python")]
 impl<W: Worker> ChildSpec<W> {
     /// Identifier this child will be registered under.
     pub(crate) fn id(&self) -> &str {
@@ -47,6 +50,7 @@ impl<W: Worker> ChildSpec<W> {
     }
 }
 
+#[cfg(feature = "python")]
 impl<W: Worker> SupervisorSpec<W> {
     /// Returns true if a child with `id` is already registered.
     pub(crate) fn has_child(&self, id: &str) -> bool {

@@ -4,7 +4,7 @@ use super::handle::SupervisorHandle;
 use super::spec::SupervisorSpec;
 use crate::restart::RestartPolicy;
 use crate::types::ChildType;
-use crate::worker::{Worker, WorkerProcess, WorkerSpec};
+use crate::worker::{Worker, WorkerProcess};
 use std::sync::Arc;
 
 /// Represents either a worker or a nested supervisor in the supervision tree
@@ -64,10 +64,4 @@ impl<W: Worker> Child<W> {
             }
         }
     }
-}
-
-/// Holds information needed to restart a child after termination
-pub(crate) enum RestartInfo<W: Worker> {
-    Worker(WorkerSpec<W>),
-    Supervisor(Arc<SupervisorSpec<W>>),
 }

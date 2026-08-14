@@ -17,7 +17,6 @@ pub(crate) enum PyWorkerArgs {
 }
 
 /// Python-compatible wrapper for Worker that accepts Python callables
-#[derive(Clone)]
 pub struct PyWorker {
     pub(crate) name: String,
     pub(crate) callable: Arc<Py<PyAny>>,
@@ -28,6 +27,9 @@ pub struct PyWorker {
     pub(crate) cancelled: Arc<AtomicBool>,
     /// Cooperative shutdown signal from the supervisor.
     pub(crate) shutdown: ShutdownSignal,
+    /// The in-flight Python call. A `spawn_blocking` task cannot be cancelled,
+    /// so this is kept across a cancellation of `run` and joined in `shutdown`.
+    body: Option<tokio::task::JoinHandle<Result<(), WorkerError>>>,
 }
 
 impl PyWorker {
@@ -39,6 +41,7 @@ impl PyWorker {
             args: PyWorkerArgs::None,
             cancelled: Arc::new(AtomicBool::new(false)),
             shutdown,
+            body: None,
         }
     }
 
@@ -55,6 +58,7 @@ impl PyWorker {
             args: PyWorkerArgs::Context(context),
             cancelled: Arc::new(AtomicBool::new(false)),
             shutdown,
+            body: None,
         }
     }
 }
@@ -112,7 +116,7 @@ impl Worker for PyWorker {
         // Run the Python callable on a blocking-pool thread. `spawn_blocking`
         // is used on its own here: spawning a bare OS thread as well would
         // double the per-worker thread cost for no benefit.
-        let result = tokio::task::spawn_blocking(move || {
+        self.body = Some(tokio::task::spawn_blocking(move || {
             Python::attach(|py| {
                 let should_stop = PyShouldStop { flag: cancelled };
                 let outcome = match &args {
@@ -133,8 +137,18 @@ impl Worker for PyWorker {
                     WorkerError::WorkerFailed(format!("worker '{name}' raised: {detail}"))
                 })
             })
-        })
-        .await;
+        }));
+
+        // The handle stays in `self` while the call is in flight. If this future
+        // is dropped for a cooperative shutdown, `shutdown` joins it there
+        // rather than leaving the Python callable running unsupervised.
+        let Some(handle) = self.body.as_mut() else {
+            return Err(WorkerError::WorkerFailed(
+                "worker body handle went missing".to_owned(),
+            ));
+        };
+        let result = handle.await;
+        self.body = None;
 
         watcher.abort();
 
@@ -150,7 +164,25 @@ impl Worker for PyWorker {
         Ok(())
     }
 
+    /// Waits for a Python callable that is still running after `run` was
+    /// cancelled.
+    ///
+    /// `spawn_blocking` work cannot be interrupted, so simply returning here
+    /// would report a graceful stop while the callable kept running - and the
+    /// supervisor would start its replacement on top of it. Blocking instead
+    /// puts the wait inside the supervisor's shutdown timeout: a worker that
+    /// polls `should_stop` returns promptly, and one that ignores it is aborted
+    /// and correctly reported as not having stopped gracefully.
     async fn shutdown(&mut self) -> Result<(), Self::Error> {
+        let Some(handle) = self.body.take() else {
+            return Ok(());
+        };
+
+        // Raise the flag here too: the watcher task does it as well, but this
+        // does not depend on that task being scheduled first.
+        self.cancelled.store(true, Ordering::SeqCst);
+
+        let _joined = handle.await;
         Ok(())
     }
 }
@@ -158,9 +190,10 @@ impl Worker for PyWorker {
 /// Calls a Python worker, adapting to the signature the user actually wrote.
 ///
 /// Workers may accept nothing, just the context (stateful only), or the context
-/// plus a `should_stop` handle. Trying the richest signature first and falling
-/// back on `TypeError` keeps simple `def worker():` callables working while
-/// letting users opt into cancellation without a separate registration API.
+/// plus a `should_stop` handle. The signature is inspected up front and the
+/// richest one it accepts is used, so simple `def worker():` callables keep
+/// working while users can opt into cancellation without a separate
+/// registration API - and, crucially, the worker body is only ever entered once.
 fn call_with_optional_args(
     py: Python<'_>,
     callable: &Arc<Py<PyAny>>,
@@ -169,6 +202,7 @@ fn call_with_optional_args(
 ) -> PyResult<Py<PyAny>> {
     let stop_obj: Py<PyAny> = should_stop.clone().into_pyobject(py)?.into_any().unbind();
 
+    // Richest first: everything the worker could want, down to nothing.
     let candidates: Vec<Vec<Py<PyAny>>> = match context {
         Some(ctx) => {
             let ctx_obj: Py<PyAny> = ctx.clone().into_pyobject(py)?.into_any().unbind();
@@ -181,6 +215,23 @@ fn call_with_optional_args(
         None => vec![vec![stop_obj.clone_ref(py)], vec![]],
     };
 
+    if let Some(accepted) = positional_arity(py, callable) {
+        for arity in candidates {
+            if accepted.accepts(arity.len()) {
+                return callable.call1(py, pyo3::types::PyTuple::new(py, arity)?);
+            }
+        }
+
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "worker callable takes {} positional arguments; ash-flare calls it \
+             with the shared context and a should_stop handle, or fewer",
+            accepted.describe()
+        )));
+    }
+
+    // No introspectable signature (some builtins and C callables). Fall back to
+    // trying each shape, which is only safe because `is_arity_error` rejects
+    // anything raised from inside the worker body.
     let mut last_err = None;
     for arity in candidates {
         let args = pyo3::types::PyTuple::new(py, arity)?;
@@ -198,6 +249,73 @@ fn call_with_optional_args(
     }))
 }
 
+/// How many positional arguments a callable accepts.
+struct Arity {
+    required: usize,
+    /// `None` when the callable takes `*args` and so accepts any count.
+    limit: Option<usize>,
+}
+
+impl Arity {
+    fn accepts(&self, count: usize) -> bool {
+        count >= self.required && self.limit.is_none_or(|limit| count <= limit)
+    }
+
+    fn describe(&self) -> String {
+        match self.limit {
+            Some(limit) if limit == self.required => format!("exactly {limit}"),
+            Some(limit) => format!("{} to {limit}", self.required),
+            None => format!("at least {}", self.required),
+        }
+    }
+}
+
+/// Reads a callable's positional arity via `inspect.signature`.
+///
+/// Returns `None` when the signature cannot be determined, which is the case for
+/// some builtins and C extension callables.
+fn positional_arity(py: Python<'_>, callable: &Arc<Py<PyAny>>) -> Option<Arity> {
+    let inspect = py.import("inspect").ok()?;
+    let signature = inspect
+        .call_method1("signature", (callable.bind(py),))
+        .ok()?;
+    let parameter = inspect.getattr("Parameter").ok()?;
+    let empty = parameter.getattr("empty").ok()?;
+    let var_positional = parameter.getattr("VAR_POSITIONAL").ok()?;
+    let positional_only = parameter.getattr("POSITIONAL_ONLY").ok()?;
+    let positional_or_keyword = parameter.getattr("POSITIONAL_OR_KEYWORD").ok()?;
+
+    let params = signature
+        .getattr("parameters")
+        .ok()?
+        .call_method0("values")
+        .ok()?;
+
+    let mut required = 0_usize;
+    let mut limit = Some(0_usize);
+
+    for param in params.try_iter().ok()? {
+        let param = param.ok()?;
+        let kind = param.getattr("kind").ok()?;
+
+        if kind.eq(&var_positional).ok()? {
+            limit = None;
+            continue;
+        }
+        if !(kind.eq(&positional_only).ok()? || kind.eq(&positional_or_keyword).ok()?) {
+            // Keyword-only and **kwargs parameters take no positional argument.
+            continue;
+        }
+
+        limit = limit.map(|max| max.saturating_add(1));
+        if param.getattr("default").ok()?.is(&empty) {
+            required = required.saturating_add(1);
+        }
+    }
+
+    Some(Arity { required, limit })
+}
+
 /// Distinguishes "wrong number of arguments" from a genuine failure inside the
 /// worker, so a `TypeError` raised by the worker body is never mistaken for a
 /// signature mismatch and silently retried.
@@ -205,6 +323,15 @@ fn is_arity_error(py: Python<'_>, err: &PyErr) -> bool {
     if !err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) {
         return false;
     }
+
+    // A signature mismatch is raised by the call machinery before the worker
+    // body is entered, so no Python frame ever ran and the traceback is empty.
+    // A `TypeError` from inside the body always carries at least the worker's
+    // own frame - retrying that would run its side effects a second time.
+    if err.traceback(py).is_some() {
+        return false;
+    }
+
     let message = err.value(py).to_string();
     message.contains("positional argument")
         || message.contains("argument")

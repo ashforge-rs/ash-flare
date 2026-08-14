@@ -14,6 +14,9 @@ use tokio::sync::mpsc;
 /// the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestartDecision {
+    /// The supervisor stopped this child itself; there is nothing to decide.
+    /// The child stays in the children list, untouched.
+    Ignore,
     /// The child's policy says not to restart; drop it from the children list.
     Drop,
     /// Restart intensity was exceeded; shut the whole supervisor down.
@@ -43,6 +46,16 @@ pub(crate) fn decide_restart(
     backoff_tracker: &mut BackoffTracker,
     child_id: &str,
 ) -> RestartDecision {
+    // A `Shutdown` exit is the supervisor's own doing: a worker only reports it
+    // after the supervisor asked it to stop. Feeding that back through the
+    // policy would treat a deliberate stop as a failure - under `OneForAll` and
+    // `RestForOne` the stops performed *as part of* a restart would each trigger
+    // another restart round, and a healthy `Transient`/`Temporary` sibling would
+    // be dropped from supervision entirely.
+    if reason == ChildExitReason::Shutdown {
+        return RestartDecision::Ignore;
+    }
+
     // Nested supervisors have no policy of their own and are always permanent.
     let should_restart = match policy {
         None | Some(RestartPolicy::Permanent) => true,
@@ -152,6 +165,67 @@ mod tests {
             ),
             RestartDecision::Restart { .. }
         ));
+    }
+
+    #[test]
+    fn supervisor_initiated_shutdown_is_ignored() {
+        for policy in [
+            None,
+            Some(RestartPolicy::Permanent),
+            Some(RestartPolicy::Transient),
+            Some(RestartPolicy::Temporary),
+        ] {
+            for strategy in [
+                RestartStrategy::OneForOne,
+                RestartStrategy::OneForAll,
+                RestartStrategy::RestForOne,
+            ] {
+                let (mut restart, mut backoff) = trackers(10);
+                assert_eq!(
+                    decide_restart(
+                        policy,
+                        ChildExitReason::Shutdown,
+                        strategy,
+                        &mut restart,
+                        &mut backoff,
+                        "c",
+                    ),
+                    RestartDecision::Ignore,
+                    "a stop the supervisor asked for is not a failure ({policy:?}, {strategy:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ignored_shutdowns_do_not_consume_restart_intensity() {
+        let (mut restart, mut backoff) = trackers(1);
+
+        for _ in 0..10 {
+            let _ignored = decide_restart(
+                Some(RestartPolicy::Permanent),
+                ChildExitReason::Shutdown,
+                RestartStrategy::OneForAll,
+                &mut restart,
+                &mut backoff,
+                "c",
+            );
+        }
+
+        assert!(
+            matches!(
+                decide_restart(
+                    Some(RestartPolicy::Permanent),
+                    ChildExitReason::Abnormal,
+                    RestartStrategy::OneForAll,
+                    &mut restart,
+                    &mut backoff,
+                    "c",
+                ),
+                RestartDecision::Restart { .. }
+            ),
+            "deliberate stops must not burn the restart budget"
+        );
     }
 
     #[test]
