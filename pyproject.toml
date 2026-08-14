@@ -34,9 +34,12 @@ Documentation = "https://docs.rs/ash-flare"
 
 [tool.maturin]
 features = ["python"]
-module-name = "ash_flare"
+module-name = "ash_flare.ash_flare"
+python-source = "python"
 
 [dependency-groups]
 dev = [
-    "mypy>=1.19.1",
+    # Capped below 2.0: mypy 2.x requires Python >= 3.10, while this package
+    # still supports 3.9. Lift the cap when `requires-python` moves to >= 3.10.
+    "mypy>=1.19.1,<2.0",
 ]

@@ -4,7 +4,8 @@ use super::child::{Child, RestartInfo};
 use super::error::SupervisorError;
 use super::handle::SupervisorHandle;
 use super::spec::{ChildSpec, SupervisorSpec};
-use crate::restart::{RestartPolicy, RestartStrategy, RestartTracker};
+use crate::restart::{BackoffTracker, RestartStrategy, RestartTracker};
+use crate::supervisor_common::{RestartDecision, decide_restart};
 use crate::types::{ChildExitReason, ChildId, ChildInfo};
 use crate::worker::{Worker, WorkerProcess, WorkerSpec, WorkerTermination};
 use std::sync::Arc;
@@ -50,6 +51,15 @@ impl<W: Worker> From<WorkerTermination> for SupervisorCommand<W> {
     }
 }
 
+/// Whether the runtime loop should keep serving commands or terminate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeControl {
+    /// Keep processing commands.
+    Continue,
+    /// Terminate the supervisor task.
+    Stop,
+}
+
 /// Internal state machine that manages supervisor lifecycle and child processes
 pub(crate) struct SupervisorRuntime<W: Worker> {
     name: String,
@@ -58,6 +68,8 @@ pub(crate) struct SupervisorRuntime<W: Worker> {
     control_tx: mpsc::UnboundedSender<SupervisorCommand<W>>,
     restart_strategy: RestartStrategy,
     restart_tracker: RestartTracker,
+    backoff_tracker: BackoffTracker,
+    shutdown_timeout: std::time::Duration,
     created_at: std::time::Instant,
 }
 
@@ -93,6 +105,8 @@ impl<W: Worker> SupervisorRuntime<W> {
             control_tx,
             restart_strategy: spec.restart_strategy,
             restart_tracker: RestartTracker::new(spec.restart_intensity),
+            backoff_tracker: BackoffTracker::new(spec.restart_backoff),
+            shutdown_timeout: spec.shutdown_timeout,
             created_at: std::time::Instant::now(),
         }
     }
@@ -128,7 +142,13 @@ impl<W: Worker> SupervisorRuntime<W> {
                     let _send = respond_to.send(uptime);
                 }
                 SupervisorCommand::ChildTerminated { id, reason } => {
-                    self.handle_child_terminated(id, reason).await;
+                    if self.handle_child_terminated(id, reason).await == RuntimeControl::Stop {
+                        // Restart intensity exceeded: children are already shut
+                        // down. Terminate the supervisor itself so a parent
+                        // supervisor observes the failure and applies its own
+                        // policy, as OTP does.
+                        return;
+                    }
                 }
                 SupervisorCommand::Shutdown => {
                     self.shutdown_children().await;
@@ -243,7 +263,8 @@ impl<W: Worker> SupervisorRuntime<W> {
             .ok_or_else(|| SupervisorError::ChildNotFound(id.to_owned()))?;
 
         let mut child = self.children.remove(position);
-        child.shutdown().await;
+        child.shutdown(self.shutdown_timeout).await;
+        self.backoff_tracker.reset_child(id);
 
         tracing::debug!(
             supervisor = %self.name,
@@ -269,7 +290,11 @@ impl<W: Worker> SupervisorRuntime<W> {
     }
 
     #[allow(clippy::indexing_slicing)]
-    async fn handle_child_terminated(&mut self, id: ChildId, reason: ChildExitReason) {
+    async fn handle_child_terminated(
+        &mut self,
+        id: ChildId,
+        reason: ChildExitReason,
+    ) -> RuntimeControl {
         tracing::debug!(
             supervisor = %self.name,
             child = %id,
@@ -283,51 +308,58 @@ impl<W: Worker> SupervisorRuntime<W> {
                 child = %id,
                 "terminated child not found in list"
             );
-            return;
+            return RuntimeControl::Continue;
         };
 
-        // Determine if we should restart based on policy and reason
-        let should_restart = match &self.children[position] {
-            Child::Worker(w) => match w.spec.restart_policy {
-                RestartPolicy::Permanent => true,
-                RestartPolicy::Temporary => false,
-                RestartPolicy::Transient => reason == ChildExitReason::Abnormal,
-            },
-            Child::Supervisor { .. } => true, // Supervisors are always permanent
-        };
+        // Supervision semantics live in one shared place; this runtime only
+        // carries out the decision.
+        let decision = decide_restart(
+            self.children[position].restart_policy_for_decision(),
+            reason,
+            self.restart_strategy,
+            &mut self.restart_tracker,
+            &mut self.backoff_tracker,
+            &id,
+        );
 
-        if !should_restart {
-            tracing::debug!(
-                supervisor = %self.name,
-                child = %id,
-                policy = ?self.children[position].restart_policy(),
-                reason = ?reason,
-                "not restarting child"
-            );
-            self.children.remove(position);
-            return;
-        }
-
-        // Check restart intensity
-        if self.restart_tracker.record_restart() {
-            tracing::error!(
-                supervisor = %self.name,
-                "restart intensity exceeded, shutting down"
-            );
-            self.shutdown_children().await;
-            return;
-        }
-
-        // Apply restart strategy
-        match self.restart_strategy {
-            RestartStrategy::OneForOne => {
-                self.restart_child(position).await;
+        match decision {
+            RestartDecision::Drop => {
+                tracing::debug!(
+                    supervisor = %self.name,
+                    child = %id,
+                    policy = ?self.children[position].restart_policy(),
+                    reason = ?reason,
+                    "not restarting child"
+                );
+                self.children.remove(position);
+                RuntimeControl::Continue
             }
-            RestartStrategy::OneForAll => {
-                self.restart_all_children().await;
+            RestartDecision::Escalate => {
+                tracing::error!(
+                    supervisor = %self.name,
+                    "restart intensity exceeded, shutting down"
+                );
+                self.shutdown_children().await;
+                RuntimeControl::Stop
             }
-            RestartStrategy::RestForOne => {
-                self.restart_from(position).await;
+            RestartDecision::Restart { delay, strategy } => {
+                if !delay.is_zero() {
+                    tracing::debug!(
+                        supervisor = %self.name,
+                        child = %id,
+                        delay_ms = %delay.as_millis(),
+                        "waiting before restart"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+
+                match strategy {
+                    RestartStrategy::OneForOne => self.restart_child(position).await,
+                    RestartStrategy::OneForAll => self.restart_all_children().await,
+                    RestartStrategy::RestForOne => self.restart_from(position).await,
+                }
+
+                RuntimeControl::Continue
             }
         }
     }
@@ -341,7 +373,9 @@ impl<W: Worker> SupervisorRuntime<W> {
         };
 
         // Shutdown old child
-        self.children[position].shutdown().await;
+        self.children[position]
+            .shutdown(self.shutdown_timeout)
+            .await;
 
         // Restart based on type
         match restart_info {
@@ -389,7 +423,7 @@ impl<W: Worker> SupervisorRuntime<W> {
 
         // Shutdown all children
         for child in &mut self.children {
-            child.shutdown().await;
+            child.shutdown(self.shutdown_timeout).await;
         }
 
         // Restart all worker children
@@ -417,7 +451,7 @@ impl<W: Worker> SupervisorRuntime<W> {
         );
 
         for i in position..self.children.len() {
-            self.children[i].shutdown().await;
+            self.children[i].shutdown(self.shutdown_timeout).await;
 
             if let Child::Worker(worker) = &self.children[i] {
                 let spec = worker.spec.clone();
@@ -436,7 +470,7 @@ impl<W: Worker> SupervisorRuntime<W> {
     async fn shutdown_children(&mut self) {
         for mut child in self.children.drain(..) {
             let id = child.id().to_owned();
-            child.shutdown().await;
+            child.shutdown(self.shutdown_timeout).await;
             tracing::debug!(
                 supervisor = %self.name,
                 child = %id,

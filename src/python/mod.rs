@@ -39,6 +39,35 @@ pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
         .get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"))
 }
 
+/// Runs a future to completion with the GIL released.
+///
+/// Holding the GIL across a blocking call stops every other Python thread,
+/// including the one that would produce the value being waited for — for
+/// unbounded waits such as `Mailbox.recv` that is a hard deadlock, and for
+/// short calls it needlessly serialises the interpreter.
+pub(crate) fn block_on_without_gil<F>(py: Python<'_>, future: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    py.detach(|| get_runtime().block_on(future))
+}
+
+/// Rejects a worker argument that is not callable, instead of accepting it and
+/// failing silently later when the supervisor tries to invoke it.
+pub(crate) fn ensure_callable(py: Python<'_>, obj: &Py<PyAny>, id: &str) -> PyResult<()> {
+    if obj.bind(py).is_callable() {
+        return Ok(());
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "worker '{id}' must be callable, got {}",
+        obj.bind(py)
+            .get_type()
+            .name()
+            .map_or_else(|_e| "?".to_owned(), |n| n.to_string())
+    )))
+}
+
 /// Python module definition
 #[pymodule]
 fn ash_flare(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -54,6 +83,15 @@ fn ash_flare(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // WorkerContext for stateful workers
     m.add_class::<PyWorkerContext>()?;
+
+    // Cooperative-shutdown handle passed to worker callables
+    m.add_class::<worker::PyShouldStop>()?;
+
+    // Package version. `__version__` is set on the extension module itself;
+    // `version` is also exported because maturin's generated `__init__.py`
+    // re-exports with `from .ash_flare import *`, which skips dunder names.
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("version", env!("CARGO_PKG_VERSION"))?;
 
     // Mailbox system
     m.add_class::<PyMailboxConfig>()?;

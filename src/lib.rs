@@ -9,6 +9,10 @@
 //! - **Restart Strategies**: `OneForOne`, `OneForAll`, and `RestForOne` strategies
 //! - **Restart Policies**: `Permanent`, `Temporary`, and `Transient` restart behaviors
 //! - **Restart Intensity**: Configurable restart limits with sliding time windows
+//! - **Restart Backoff**: Exponential delay between restarts so a crash-looping
+//!   child cannot saturate a CPU core
+//! - **Graceful Shutdown**: Workers are asked to stop via a
+//!   [`ShutdownSignal`] and get their `shutdown` hook run before being aborted
 //! - **Distributed**: Run supervisors across processes or machines via TCP/Unix sockets
 //! - **Generic Workers**: Trait-based worker system for any async workload
 //! - **Dynamic Management**: Add/remove children at runtime
@@ -75,6 +79,12 @@
 #![warn(clippy::all)]
 #![warn(rust_2018_idioms)]
 
+/// Compiles the Rust examples in `README.md` as doctests so they cannot drift
+/// out of sync with the real API.
+#[doc = include_str!("../README.md")]
+#[cfg(doctest)]
+mod readme_doctests {}
+
 #[macro_use]
 mod macros;
 
@@ -88,16 +98,18 @@ pub mod distributed;
 pub mod mailbox;
 pub mod supervisor_stateful;
 
-// Python bindings module
+// Python bindings module, compiled only for the `python` feature so pure-Rust
+// consumers do not pull in pyo3 or link against Python.
+#[cfg(feature = "python")]
 pub mod python;
 
 // Re-export public API
-pub use restart::{RestartIntensity, RestartPolicy, RestartStrategy};
+pub use restart::{RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy};
 pub use supervisor::{SupervisorError, SupervisorHandle, SupervisorSpec};
 pub use supervisor_stateful::{
     StatefulSupervisorError, StatefulSupervisorHandle, StatefulSupervisorSpec,
 };
-pub use types::{ChildExitReason, ChildId, ChildInfo, ChildType, WorkerContext};
+pub use types::{ChildExitReason, ChildId, ChildInfo, ChildType, ShutdownSignal, WorkerContext};
 pub use worker::{Worker, WorkerError};
 
 // Re-export mailbox types

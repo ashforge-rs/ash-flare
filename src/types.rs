@@ -65,6 +65,91 @@ pub enum ChildType {
     Supervisor,
 }
 
+/// Cooperative shutdown signal handed to a worker.
+///
+/// A supervisor asks a worker to stop before resorting to aborting its task.
+/// Select on [`ShutdownSignal::cancelled`] inside [`run`](crate::Worker::run) so
+/// the worker can return promptly and let
+/// [`shutdown`](crate::Worker::shutdown) perform its cleanup.
+///
+/// A worker that ignores the signal is aborted once the shutdown timeout
+/// elapses, and its `shutdown` hook does **not** run.
+///
+/// # Examples
+///
+/// ```
+/// use ash_flare::{ShutdownSignal, Worker};
+/// use async_trait::async_trait;
+///
+/// struct Pump {
+///     shutdown: ShutdownSignal,
+/// }
+///
+/// #[async_trait]
+/// impl Worker for Pump {
+///     type Error = std::io::Error;
+///
+///     async fn run(&mut self) -> Result<(), Self::Error> {
+///         loop {
+///             tokio::select! {
+///                 () = self.shutdown.cancelled() => return Ok(()),
+///                 () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+///                     // ... do a unit of work ...
+///                 }
+///             }
+///         }
+///     }
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct ShutdownSignal {
+    rx: tokio::sync::watch::Receiver<bool>,
+}
+
+impl ShutdownSignal {
+    pub(crate) fn new(rx: tokio::sync::watch::Receiver<bool>) -> Self {
+        Self { rx }
+    }
+
+    /// Creates a signal that is never triggered.
+    ///
+    /// Useful for constructing a worker outside a supervision tree, such as in
+    /// tests.
+    #[must_use]
+    pub fn never() -> Self {
+        static NEVER: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> =
+            std::sync::OnceLock::new();
+        // The sender is kept alive for the program's lifetime so `cancelled`
+        // parks forever instead of returning on a closed channel.
+        let tx = NEVER.get_or_init(|| tokio::sync::watch::channel(false).0);
+        Self { rx: tx.subscribe() }
+    }
+
+    /// Returns `true` if shutdown has already been requested.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        *self.rx.borrow()
+    }
+
+    /// Resolves once shutdown has been requested.
+    ///
+    /// Cancel-safe, so it can be used directly as a `tokio::select!` branch.
+    /// Returns immediately if shutdown was already requested.
+    pub async fn cancelled(&self) {
+        let mut rx = self.rx.clone();
+        if *rx.borrow() {
+            return;
+        }
+        // `changed` only errors when every sender is gone, which means the
+        // supervisor is gone too; treat that as a shutdown request.
+        while rx.changed().await.is_ok() {
+            if *rx.borrow() {
+                return;
+            }
+        }
+    }
+}
+
 /// Shared context for stateful workers with in-memory key-value store.
 ///
 /// Provides a process-local, concurrency-safe storage for workers to share state.

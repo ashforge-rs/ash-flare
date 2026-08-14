@@ -9,8 +9,10 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use crate::mailbox::{Mailbox, MailboxConfig, MailboxHandle};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-use super::get_runtime;
+use super::block_on_without_gil;
 
 /// Python-facing mailbox configuration
 #[pyclass(name = "MailboxConfig", skip_from_py_object)]
@@ -51,10 +53,13 @@ pub struct PyMailboxHandle {
 
 #[pymethods]
 impl PyMailboxHandle {
-    fn send(&self, message: String, _py: Python<'_>) -> PyResult<()> {
+    /// Sends a message, waiting for capacity on a bounded mailbox.
+    ///
+    /// Releases the GIL while waiting so a full mailbox cannot stall the
+    /// interpreter.
+    fn send(&self, message: String, py: Python<'_>) -> PyResult<()> {
         let handle = self.inner.clone();
-        let runtime = get_runtime();
-        runtime.block_on(async move {
+        block_on_without_gil(py, async move {
             handle
                 .send(message)
                 .await
@@ -82,22 +87,38 @@ impl PyMailboxHandle {
 }
 
 /// Python-facing mailbox
+///
+/// The receiver is held behind a mutex rather than through `&mut self` so that
+/// [`PyMailbox::recv`] can block without pyo3 holding a borrow guard on the
+/// object for the whole wait. Combined with releasing the GIL, that is what
+/// lets another Python thread send the message this call is waiting for.
 #[pyclass(name = "Mailbox")]
 pub struct PyMailbox {
-    inner: Mailbox,
+    inner: Arc<Mutex<Mailbox>>,
 }
 
 #[pymethods]
 impl PyMailbox {
-    fn recv(&mut self, _py: Python<'_>) -> Option<String> {
-        let runtime = get_runtime();
-        runtime.block_on(async move { self.inner.recv().await })
+    /// Blocks until a message arrives, returning `None` once every sender is
+    /// dropped.
+    ///
+    /// Releases the GIL while waiting, so other Python threads keep running.
+    fn recv(&self, py: Python<'_>) -> Option<String> {
+        let inner = Arc::clone(&self.inner);
+        block_on_without_gil(py, async move {
+            let mut guard = inner.lock().await;
+            guard.recv().await
+        })
     }
 
-    fn try_recv(&mut self) -> PyResult<String> {
-        self.inner
-            .try_recv()
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to receive: {e}")))
+    /// Returns a message if one is already queued, raising otherwise.
+    fn try_recv(&self, py: Python<'_>) -> PyResult<String> {
+        let inner = Arc::clone(&self.inner);
+        let result = block_on_without_gil(py, async move {
+            let mut guard = inner.lock().await;
+            guard.try_recv()
+        });
+        result.map_err(|e| PyRuntimeError::new_err(format!("Failed to receive: {e}")))
     }
 
     #[allow(clippy::unused_self)]
@@ -111,7 +132,9 @@ pub fn mailbox(config: &PyMailboxConfig) -> (PyMailboxHandle, PyMailbox) {
     let (handle, mailbox) = crate::mailbox::mailbox(config.inner);
     (
         PyMailboxHandle { inner: handle },
-        PyMailbox { inner: mailbox },
+        PyMailbox {
+            inner: Arc::new(Mutex::new(mailbox)),
+        },
     )
 }
 
@@ -120,6 +143,8 @@ pub fn mailbox_named(worker_id: String, config: &PyMailboxConfig) -> (PyMailboxH
     let (handle, mailbox) = crate::mailbox::mailbox_named(config.inner, worker_id);
     (
         PyMailboxHandle { inner: handle },
-        PyMailbox { inner: mailbox },
+        PyMailbox {
+            inner: Arc::new(Mutex::new(mailbox)),
+        },
     )
 }

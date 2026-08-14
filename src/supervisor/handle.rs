@@ -47,8 +47,25 @@ impl<W: Worker> SupervisorHandle<W> {
         factory: impl Fn() -> W + Send + Sync + 'static,
         restart_policy: RestartPolicy,
     ) -> Result<ChildId, SupervisorError> {
+        self.start_child_with_signal(id, move |_signal| factory(), restart_policy)
+            .await
+    }
+
+    /// Dynamically starts a child whose factory receives the worker's
+    /// [`ShutdownSignal`](crate::ShutdownSignal), so it can observe cooperative
+    /// termination.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor is shutting down or a child with this ID already exists.
+    pub async fn start_child_with_signal(
+        &self,
+        id: impl Into<String>,
+        factory: impl Fn(crate::ShutdownSignal) -> W + Send + Sync + 'static,
+        restart_policy: RestartPolicy,
+    ) -> Result<ChildId, SupervisorError> {
         let (result_tx, result_rx) = oneshot::channel();
-        let spec = WorkerSpec::new(id, factory, restart_policy);
+        let spec = WorkerSpec::with_signal(id, factory, restart_policy);
 
         self.control_tx
             .send(SupervisorCommand::StartChild {
