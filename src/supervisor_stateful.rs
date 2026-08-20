@@ -68,9 +68,13 @@
 //! # }
 //! ```
 
-use crate::restart::{RestartIntensity, RestartPolicy, RestartStrategy, RestartTracker};
-use crate::supervisor_common::{WorkerTermination, run_worker};
-use crate::types::{ChildExitReason, ChildId, ChildInfo, ChildType, WorkerContext};
+use crate::restart::{
+    BackoffTracker, RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy,
+    RestartTracker,
+};
+use crate::supervisor::RuntimeControl;
+use crate::supervisor_common::{RestartDecision, WorkerTermination, decide_restart, run_worker};
+use crate::types::{ChildExitReason, ChildId, ChildInfo, ChildType, ShutdownSignal, WorkerContext};
 use crate::worker::Worker;
 use std::fmt;
 use std::sync::Arc;
@@ -84,7 +88,7 @@ use tokio::task::JoinHandle;
 /// Specification for creating and restarting a stateful worker
 pub(crate) struct StatefulWorkerSpec<W: Worker> {
     pub id: ChildId,
-    pub worker_factory: Arc<dyn Fn(Arc<WorkerContext>) -> W + Send + Sync>,
+    pub worker_factory: Arc<dyn Fn(Arc<WorkerContext>, ShutdownSignal) -> W + Send + Sync>,
     pub restart_policy: RestartPolicy,
     pub context: Arc<WorkerContext>,
 }
@@ -107,6 +111,21 @@ impl<W: Worker> StatefulWorkerSpec<W> {
         restart_policy: RestartPolicy,
         context: Arc<WorkerContext>,
     ) -> Self {
+        Self::with_signal(
+            id,
+            move |ctx, _signal| factory(ctx),
+            restart_policy,
+            context,
+        )
+    }
+
+    /// Builds a spec whose factory also receives the worker's [`ShutdownSignal`].
+    pub(crate) fn with_signal(
+        id: impl Into<String>,
+        factory: impl Fn(Arc<WorkerContext>, ShutdownSignal) -> W + Send + Sync + 'static,
+        restart_policy: RestartPolicy,
+        context: Arc<WorkerContext>,
+    ) -> Self {
         Self {
             id: id.into(),
             worker_factory: Arc::new(factory),
@@ -115,8 +134,8 @@ impl<W: Worker> StatefulWorkerSpec<W> {
         }
     }
 
-    pub(crate) fn create_worker(&self) -> W {
-        (self.worker_factory)(Arc::clone(&self.context))
+    pub(crate) fn create_worker(&self, signal: ShutdownSignal) -> W {
+        (self.worker_factory)(Arc::clone(&self.context), signal)
     }
 }
 
@@ -137,6 +156,8 @@ impl<W: Worker> fmt::Debug for StatefulWorkerSpec<W> {
 pub(crate) struct StatefulWorkerProcess<W: Worker> {
     pub spec: StatefulWorkerSpec<W>,
     pub handle: Option<JoinHandle<()>>,
+    /// Triggers cooperative shutdown; dropping it also releases the worker.
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl<W: Worker> StatefulWorkerProcess<W> {
@@ -148,16 +169,7 @@ impl<W: Worker> StatefulWorkerProcess<W> {
     where
         Cmd: From<WorkerTermination> + Send + 'static,
     {
-        let worker = spec.create_worker();
-        let worker_id = spec.id.clone();
-        let handle = tokio::spawn(async move {
-            run_worker(supervisor_name, worker_id, worker, control_tx, None).await;
-        });
-
-        Self {
-            spec,
-            handle: Some(handle),
-        }
+        Self::spawn_inner(spec, supervisor_name, control_tx, None)
     }
 
     /// Spawns a worker with linked initialization handshake
@@ -170,15 +182,31 @@ impl<W: Worker> StatefulWorkerProcess<W> {
     where
         Cmd: From<WorkerTermination> + Send + 'static,
     {
-        let worker = spec.create_worker();
+        Self::spawn_inner(spec, supervisor_name, control_tx, Some(init_tx))
+    }
+
+    fn spawn_inner<Cmd>(
+        spec: StatefulWorkerSpec<W>,
+        supervisor_name: String,
+        control_tx: mpsc::UnboundedSender<Cmd>,
+        init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    ) -> Self
+    where
+        Cmd: From<WorkerTermination> + Send + 'static,
+    {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let worker = spec.create_worker(ShutdownSignal::new(shutdown_rx.clone()));
         let worker_id = spec.id.clone();
+        let signal = ShutdownSignal::new(shutdown_rx);
+
         let handle = tokio::spawn(async move {
             run_worker(
                 supervisor_name,
                 worker_id,
                 worker,
                 control_tx,
-                Some(init_tx),
+                init_tx,
+                signal,
             )
             .await;
         });
@@ -186,14 +214,41 @@ impl<W: Worker> StatefulWorkerProcess<W> {
         Self {
             spec,
             handle: Some(handle),
+            shutdown_tx,
         }
     }
 
-    pub(crate) async fn stop(&mut self) {
-        if let Some(handle) = self.handle.take() {
+    /// Stops the worker, giving it `timeout` to wind down cooperatively before
+    /// aborting the task.
+    ///
+    /// Returns `true` if the worker stopped on its own (so its `shutdown` hook
+    /// ran), `false` if it had to be aborted.
+    pub(crate) async fn stop(&mut self, timeout: std::time::Duration) -> bool {
+        let Some(mut handle) = self.handle.take() else {
+            return true;
+        };
+
+        // Ask the worker to stop. A send error means the task is already gone.
+        let _notified = self.shutdown_tx.send(true);
+
+        if timeout.is_zero() {
             handle.abort();
-            // Ignoring result as handle may have already completed
-            drop(handle.await);
+            let _join_result = handle.await;
+            return false;
+        }
+
+        match tokio::time::timeout(timeout, &mut handle).await {
+            Ok(_joined) => true,
+            Err(_elapsed) => {
+                tracing::warn!(
+                    worker = %self.spec.id,
+                    timeout_ms = %timeout.as_millis(),
+                    "worker did not stop within shutdown timeout, aborting"
+                );
+                handle.abort();
+                let _join_result = handle.await;
+                false
+            }
         }
     }
 }
@@ -231,6 +286,8 @@ pub struct StatefulSupervisorSpec<W: Worker> {
     pub(crate) children: Vec<StatefulChildSpec<W>>,
     pub(crate) restart_strategy: RestartStrategy,
     pub(crate) restart_intensity: RestartIntensity,
+    pub(crate) restart_backoff: RestartBackoff,
+    pub(crate) shutdown_timeout: std::time::Duration,
     pub(crate) context: Arc<WorkerContext>,
 }
 
@@ -241,12 +298,33 @@ impl<W: Worker> Clone for StatefulSupervisorSpec<W> {
             children: self.children.clone(),
             restart_strategy: self.restart_strategy,
             restart_intensity: self.restart_intensity,
+            restart_backoff: self.restart_backoff,
+            shutdown_timeout: self.shutdown_timeout,
             context: Arc::clone(&self.context),
         }
     }
 }
 
+// Only the Python bindings validate ids at registration time; the Rust builder
+// leaves duplicate detection to `start_child`.
+#[cfg(feature = "python")]
+impl<W: Worker> StatefulChildSpec<W> {
+    /// Identifier this child will be registered under.
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            StatefulChildSpec::Worker(w) => &w.id,
+            StatefulChildSpec::Supervisor(s) => &s.name,
+        }
+    }
+}
+
 impl<W: Worker> StatefulSupervisorSpec<W> {
+    /// Returns true if a child with `id` is already registered.
+    #[cfg(feature = "python")]
+    pub(crate) fn has_child(&self, id: &str) -> bool {
+        self.children.iter().any(|c| c.id() == id)
+    }
+
     /// Creates a new stateful supervisor specification with the provided name.
     /// Automatically initializes an empty `WorkerContext` for sharing state between workers.
     pub fn new(name: impl Into<String>) -> Self {
@@ -255,6 +333,8 @@ impl<W: Worker> StatefulSupervisorSpec<W> {
             children: Vec::new(),
             restart_strategy: RestartStrategy::default(),
             restart_intensity: RestartIntensity::default(),
+            restart_backoff: RestartBackoff::default(),
+            shutdown_timeout: crate::supervisor::DEFAULT_SHUTDOWN_TIMEOUT,
             context: Arc::new(WorkerContext::new()),
         }
     }
@@ -270,6 +350,60 @@ impl<W: Worker> StatefulSupervisorSpec<W> {
     #[must_use]
     pub fn with_restart_intensity(mut self, intensity: RestartIntensity) -> Self {
         self.restart_intensity = intensity;
+        self
+    }
+
+    /// Sets the backoff applied between a child terminating and being restarted.
+    ///
+    /// Defaults to an exponential backoff of 100ms doubling up to 30s. Use
+    /// [`RestartBackoff::none`] to restart immediately, at the cost of allowing a
+    /// crash-looping child to saturate a CPU core.
+    #[must_use]
+    pub fn with_restart_backoff(mut self, backoff: RestartBackoff) -> Self {
+        self.restart_backoff = backoff;
+        self
+    }
+
+    /// Sets a fixed delay between a child terminating and being restarted.
+    ///
+    /// Convenience wrapper over [`StatefulSupervisorSpec::with_restart_backoff`]
+    /// for a constant delay; `delay` is used as both the initial and maximum delay.
+    #[must_use]
+    pub fn with_restart_delay(self, delay: std::time::Duration) -> Self {
+        self.with_restart_backoff(RestartBackoff::exponential(delay, delay))
+    }
+
+    /// Sets how long a worker may take to stop cooperatively before its task is
+    /// aborted.
+    ///
+    /// On termination each worker is sent a [`ShutdownSignal`]; a worker that
+    /// returns from `run` within this window also gets its
+    /// [`shutdown`](Worker::shutdown) hook run. A worker that ignores the signal
+    /// is aborted and does **not** get the hook. Defaults to 5 seconds;
+    /// `Duration::ZERO` aborts immediately.
+    #[must_use]
+    pub fn with_shutdown_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.shutdown_timeout = timeout;
+        self
+    }
+
+    /// Adds a stateful worker whose factory also receives the worker's
+    /// [`ShutdownSignal`], so it can observe cooperative shutdown.
+    #[must_use]
+    pub fn with_worker_signal(
+        mut self,
+        id: impl Into<String>,
+        factory: impl Fn(Arc<WorkerContext>, ShutdownSignal) -> W + Send + Sync + 'static,
+        restart_policy: RestartPolicy,
+    ) -> Self {
+        let context = Arc::clone(&self.context);
+        self.children
+            .push(StatefulChildSpec::Worker(StatefulWorkerSpec::with_signal(
+                id,
+                factory,
+                restart_policy,
+                context,
+            )));
         self
     }
 
@@ -346,20 +480,28 @@ impl<W: Worker> StatefulChild<W> {
         }
     }
 
-    pub async fn shutdown(&mut self) {
+    /// Policy as seen by the shared restart decision: `None` for nested
+    /// supervisors, which are always treated as permanent.
+    #[inline]
+    pub fn restart_policy_for_decision(&self) -> Option<RestartPolicy> {
         match self {
-            StatefulChild::Worker(w) => w.stop().await,
+            StatefulChild::Worker(w) => Some(w.spec.restart_policy),
+            StatefulChild::Supervisor { .. } => None,
+        }
+    }
+
+    /// Stops the child, allowing `timeout` for a worker to wind down
+    /// cooperatively before its task is aborted.
+    pub async fn shutdown(&mut self, timeout: std::time::Duration) {
+        match self {
+            StatefulChild::Worker(w) => {
+                let _graceful = w.stop(timeout).await;
+            }
             StatefulChild::Supervisor { handle, .. } => {
                 let _shutdown_result = handle.shutdown().await;
             }
         }
     }
-}
-
-/// Holds information needed to restart a child after termination
-pub(crate) enum StatefulRestartInfo<W: Worker> {
-    Worker(StatefulWorkerSpec<W>),
-    Supervisor(Arc<StatefulSupervisorSpec<W>>),
 }
 
 // ============================================================================
@@ -472,6 +614,13 @@ pub(crate) enum StatefulSupervisorCommand<W: Worker> {
         id: ChildId,
         reason: ChildExitReason,
     },
+    /// Fires once a restart backoff has elapsed. Restarts are deferred through
+    /// the command queue so the supervisor keeps serving commands while a child
+    /// is backing off.
+    RestartChild {
+        id: ChildId,
+        strategy: RestartStrategy,
+    },
     Shutdown,
 }
 
@@ -492,6 +641,8 @@ pub(crate) struct StatefulSupervisorRuntime<W: Worker> {
     control_tx: mpsc::UnboundedSender<StatefulSupervisorCommand<W>>,
     restart_strategy: RestartStrategy,
     restart_tracker: RestartTracker,
+    backoff_tracker: BackoffTracker,
+    shutdown_timeout: std::time::Duration,
     created_at: std::time::Instant,
 }
 
@@ -514,7 +665,10 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
                     children.push(StatefulChild::Worker(worker));
                 }
                 StatefulChildSpec::Supervisor(supervisor_spec) => {
-                    let supervisor = StatefulSupervisorHandle::start((*supervisor_spec).clone());
+                    let supervisor = StatefulSupervisorHandle::start_supervised(
+                        (*supervisor_spec).clone(),
+                        control_tx.clone(),
+                    );
                     children.push(StatefulChild::Supervisor {
                         handle: supervisor,
                         spec: Arc::clone(&supervisor_spec),
@@ -530,11 +684,15 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
             control_tx,
             restart_strategy: spec.restart_strategy,
             restart_tracker: RestartTracker::new(spec.restart_intensity),
+            backoff_tracker: BackoffTracker::new(spec.restart_backoff),
+            shutdown_timeout: spec.shutdown_timeout,
             created_at: std::time::Instant::now(),
         }
     }
 
-    pub(crate) async fn run(mut self) {
+    /// Serves commands until the supervisor terminates, and reports *why* it
+    /// terminated so a parent supervisor can apply its own policy.
+    pub(crate) async fn run(mut self) -> ChildExitReason {
         while let Some(command) = self.control_rx.recv().await {
             match command {
                 StatefulSupervisorCommand::StartChild { spec, respond_to } => {
@@ -565,16 +723,26 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
                     let _send = respond_to.send(uptime);
                 }
                 StatefulSupervisorCommand::ChildTerminated { id, reason } => {
-                    self.handle_child_terminated(id, reason).await;
+                    if self.handle_child_terminated(id, reason).await == RuntimeControl::Stop {
+                        // Restart intensity exceeded: children are already shut
+                        // down. Terminate the supervisor itself, reporting an
+                        // abnormal exit so a parent supervisor observes the
+                        // failure and applies its own policy, as OTP does.
+                        return ChildExitReason::Abnormal;
+                    }
+                }
+                StatefulSupervisorCommand::RestartChild { id, strategy } => {
+                    self.handle_restart_child(&id, strategy).await;
                 }
                 StatefulSupervisorCommand::Shutdown => {
                     self.shutdown_children().await;
-                    return;
+                    return ChildExitReason::Shutdown;
                 }
             }
         }
 
         self.shutdown_children().await;
+        ChildExitReason::Shutdown
     }
 
     fn handle_start_child(
@@ -683,7 +851,8 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
             .ok_or_else(|| StatefulSupervisorError::ChildNotFound(id.to_owned()))?;
 
         let mut child = self.children.remove(position);
-        child.shutdown().await;
+        child.shutdown(self.shutdown_timeout).await;
+        self.backoff_tracker.reset_child(id);
 
         tracing::debug!(
             supervisor = %self.name,
@@ -709,7 +878,11 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
     }
 
     #[allow(clippy::indexing_slicing)]
-    async fn handle_child_terminated(&mut self, id: ChildId, reason: ChildExitReason) {
+    async fn handle_child_terminated(
+        &mut self,
+        id: ChildId,
+        reason: ChildExitReason,
+    ) -> RuntimeControl {
         tracing::debug!(
             supervisor = %self.name,
             child = %id,
@@ -723,105 +896,139 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
                 child = %id,
                 "terminated child not found in list"
             );
-            return;
+            return RuntimeControl::Continue;
         };
 
-        // Determine if we should restart based on policy and reason
-        let should_restart = match &self.children[position] {
-            StatefulChild::Worker(w) => match w.spec.restart_policy {
-                RestartPolicy::Permanent => true,
-                RestartPolicy::Temporary => false,
-                RestartPolicy::Transient => reason == ChildExitReason::Abnormal,
-            },
-            StatefulChild::Supervisor { .. } => true, // Supervisors are always permanent
-        };
+        // Supervision semantics live in one shared place; this runtime only
+        // carries out the decision.
+        let decision = decide_restart(
+            self.children[position].restart_policy_for_decision(),
+            reason,
+            self.restart_strategy,
+            &mut self.restart_tracker,
+            &mut self.backoff_tracker,
+            &id,
+        );
 
-        if !should_restart {
+        match decision {
+            RestartDecision::Ignore => {
+                // The supervisor stopped this child itself, as part of a restart
+                // round or a shutdown. Nothing to do; the child list already
+                // reflects whatever that operation intended.
+                RuntimeControl::Continue
+            }
+            RestartDecision::Drop => {
+                tracing::debug!(
+                    supervisor = %self.name,
+                    child = %id,
+                    policy = ?self.children[position].restart_policy(),
+                    reason = ?reason,
+                    "not restarting child"
+                );
+                self.children.remove(position);
+                RuntimeControl::Continue
+            }
+            RestartDecision::Escalate => {
+                tracing::error!(
+                    supervisor = %self.name,
+                    "restart intensity exceeded, shutting down"
+                );
+                self.shutdown_children().await;
+                RuntimeControl::Stop
+            }
+            RestartDecision::Restart { delay, strategy } => {
+                if delay.is_zero() {
+                    self.apply_restart(position, strategy).await;
+                } else {
+                    self.defer_restart(id, delay, strategy);
+                }
+
+                RuntimeControl::Continue
+            }
+        }
+    }
+
+    /// Schedules a restart for after `delay` without blocking the command loop.
+    ///
+    /// Sleeping inline would stall `Shutdown`, `which_children` and every other
+    /// command for the whole backoff - up to 30s with the default settings.
+    fn defer_restart(&self, id: ChildId, delay: std::time::Duration, strategy: RestartStrategy) {
+        tracing::debug!(
+            supervisor = %self.name,
+            child = %id,
+            delay_ms = %delay.as_millis(),
+            "waiting before restart"
+        );
+
+        let control_tx = self.control_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _send = control_tx.send(StatefulSupervisorCommand::RestartChild { id, strategy });
+        });
+    }
+
+    /// Carries out a restart whose backoff has elapsed.
+    async fn handle_restart_child(&mut self, id: &str, strategy: RestartStrategy) {
+        let Some(position) = self.children.iter().position(|c| c.id() == id) else {
+            // Terminated or dropped while it was backing off.
             tracing::debug!(
                 supervisor = %self.name,
                 child = %id,
-                policy = ?self.children[position].restart_policy(),
-                reason = ?reason,
-                "not restarting child"
+                "child is no longer supervised, skipping deferred restart"
             );
-            self.children.remove(position);
             return;
-        }
+        };
 
-        // Check restart intensity
-        if self.restart_tracker.record_restart() {
-            tracing::error!(
-                supervisor = %self.name,
-                "restart intensity exceeded, shutting down"
-            );
-            self.shutdown_children().await;
-            return;
-        }
+        self.apply_restart(position, strategy).await;
+    }
 
-        // Apply restart strategy
-        match self.restart_strategy {
-            RestartStrategy::OneForOne => {
-                self.restart_child(position).await;
-            }
-            RestartStrategy::OneForAll => {
-                self.restart_all_children().await;
-            }
-            RestartStrategy::RestForOne => {
-                self.restart_from(position).await;
-            }
+    async fn apply_restart(&mut self, position: usize, strategy: RestartStrategy) {
+        match strategy {
+            RestartStrategy::OneForOne => self.restart_child(position).await,
+            RestartStrategy::OneForAll => self.restart_all_children().await,
+            RestartStrategy::RestForOne => self.restart_from(position).await,
         }
     }
 
     #[allow(clippy::indexing_slicing)]
     async fn restart_child(&mut self, position: usize) {
-        // Extract spec info before shutdown
-        let restart_info = match &self.children[position] {
-            StatefulChild::Worker(worker) => StatefulRestartInfo::Worker(worker.spec.clone()),
-            StatefulChild::Supervisor { spec, .. } => {
-                StatefulRestartInfo::Supervisor(Arc::clone(spec))
-            }
-        };
+        self.children[position]
+            .shutdown(self.shutdown_timeout)
+            .await;
 
-        // Shutdown old child
-        self.children[position].shutdown().await;
+        let id = Self::respawn(&mut self.children[position], &self.name, &self.control_tx);
+        tracing::debug!(
+            supervisor = %self.name,
+            child = %id,
+            "child restarted"
+        );
+    }
 
-        // Restart based on type
-        match restart_info {
-            StatefulRestartInfo::Worker(spec) => {
-                tracing::debug!(
-                    supervisor = %self.name,
-                    worker = %spec.id,
-                    "restarting worker"
-                );
-                let new_worker = StatefulWorkerProcess::spawn(
-                    spec.clone(),
-                    self.name.clone(),
-                    self.control_tx.clone(),
-                );
-                self.children[position] = StatefulChild::Worker(new_worker);
-                tracing::debug!(
-                    supervisor = %self.name,
-                    worker = %spec.id,
-                    "worker restarted"
-                );
-            }
-            StatefulRestartInfo::Supervisor(spec) => {
-                let name = spec.name.clone();
-                tracing::debug!(
-                    supervisor = %self.name,
-                    child_supervisor = %name,
-                    "restarting supervisor"
-                );
-                let new_handle = StatefulSupervisorHandle::start((*spec).clone());
-                self.children[position] = StatefulChild::Supervisor {
-                    handle: new_handle,
+    /// Replaces a child that has been shut down with a freshly started one,
+    /// returning its id.
+    fn respawn(
+        child: &mut StatefulChild<W>,
+        supervisor_name: &str,
+        control_tx: &mpsc::UnboundedSender<StatefulSupervisorCommand<W>>,
+    ) -> ChildId {
+        match child {
+            StatefulChild::Worker(worker) => {
+                let spec = worker.spec.clone();
+                let id = spec.id.clone();
+                *child = StatefulChild::Worker(StatefulWorkerProcess::spawn(
                     spec,
-                };
-                tracing::debug!(
-                    supervisor = %self.name,
-                    child_supervisor = %name,
-                    "supervisor restarted"
-                );
+                    supervisor_name.to_owned(),
+                    control_tx.clone(),
+                ));
+                id
+            }
+            StatefulChild::Supervisor { spec, .. } => {
+                let spec = Arc::clone(spec);
+                let id = spec.name.clone();
+                let handle =
+                    StatefulSupervisorHandle::start_supervised((*spec).clone(), control_tx.clone());
+                *child = StatefulChild::Supervisor { handle, spec };
+                id
             }
         }
     }
@@ -834,26 +1041,40 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
 
         // Shutdown all children
         for child in &mut self.children {
-            child.shutdown().await;
+            child.shutdown(self.shutdown_timeout).await;
         }
 
-        // Restart all worker children
-        for child in &mut self.children {
-            if let StatefulChild::Worker(worker) = child {
-                let spec = worker.spec.clone();
-                let new_worker = StatefulWorkerProcess::spawn(
-                    spec.clone(),
-                    self.name.clone(),
-                    self.control_tx.clone(),
-                );
-                *child = StatefulChild::Worker(new_worker);
+        let mut kept = Vec::with_capacity(self.children.len());
+        for mut child in self.children.drain(..) {
+            if Self::leaves_supervision(&child) {
                 tracing::debug!(
                     supervisor = %self.name,
-                    child = %spec.id,
-                    "child restarted"
+                    child = %child.id(),
+                    "temporary child not restarted, dropping from supervision"
                 );
+                self.backoff_tracker.reset_child(child.id());
+                continue;
             }
+
+            // Nested supervisors were just shut down too, so skipping them would
+            // strand a dead handle in the children list.
+            let id = Self::respawn(&mut child, &self.name, &self.control_tx);
+            tracing::debug!(
+                supervisor = %self.name,
+                child = %id,
+                "child restarted"
+            );
+            kept.push(child);
         }
+        self.children = kept;
+    }
+
+    /// Whether a child stopped as part of a restart round is gone for good.
+    ///
+    /// A `Temporary` child is never restarted, not even when it was a sibling's
+    /// failure that stopped it, so it leaves supervision here.
+    fn leaves_supervision(child: &StatefulChild<W>) -> bool {
+        child.restart_policy() == Some(RestartPolicy::Temporary)
     }
 
     #[allow(clippy::indexing_slicing)]
@@ -864,30 +1085,35 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
             "restarting from position (rest_for_one)"
         );
 
-        for i in position..self.children.len() {
-            self.children[i].shutdown().await;
+        let mut kept = Vec::new();
+        for mut child in self.children.split_off(position) {
+            child.shutdown(self.shutdown_timeout).await;
 
-            if let StatefulChild::Worker(worker) = &self.children[i] {
-                let spec = worker.spec.clone();
-                let new_worker = StatefulWorkerProcess::spawn(
-                    spec.clone(),
-                    self.name.clone(),
-                    self.control_tx.clone(),
-                );
-                self.children[i] = StatefulChild::Worker(new_worker);
+            if Self::leaves_supervision(&child) {
                 tracing::debug!(
                     supervisor = %self.name,
-                    child = %spec.id,
-                    "child restarted"
+                    child = %child.id(),
+                    "temporary child not restarted, dropping from supervision"
                 );
+                self.backoff_tracker.reset_child(child.id());
+                continue;
             }
+
+            let id = Self::respawn(&mut child, &self.name, &self.control_tx);
+            tracing::debug!(
+                supervisor = %self.name,
+                child = %id,
+                "child restarted"
+            );
+            kept.push(child);
         }
+        self.children.append(&mut kept);
     }
 
     async fn shutdown_children(&mut self) {
         for mut child in self.children.drain(..) {
             let id = child.id().to_owned();
-            child.shutdown().await;
+            child.shutdown(self.shutdown_timeout).await;
             tracing::debug!(
                 supervisor = %self.name,
                 child = %id,
@@ -902,24 +1128,62 @@ impl<W: Worker> StatefulSupervisorRuntime<W> {
 // ============================================================================
 
 /// Handle used to interact with a running stateful supervisor tree.
-#[derive(Clone)]
 pub struct StatefulSupervisorHandle<W: Worker> {
     pub(crate) name: Arc<String>,
     pub(crate) control_tx: mpsc::UnboundedSender<StatefulSupervisorCommand<W>>,
+}
+
+// Hand-written so cloning a handle does not require the worker itself to be
+// `Clone`; a handle is just a name and a channel.
+impl<W: Worker> Clone for StatefulSupervisorHandle<W> {
+    fn clone(&self) -> Self {
+        Self {
+            name: Arc::clone(&self.name),
+            control_tx: self.control_tx.clone(),
+        }
+    }
 }
 
 impl<W: Worker> StatefulSupervisorHandle<W> {
     /// Spawns a stateful supervisor tree based on the provided specification.
     #[must_use]
     pub fn start(spec: StatefulSupervisorSpec<W>) -> Self {
+        Self::start_inner(spec, None)
+    }
+
+    /// Spawns a supervisor as the child of another one, reporting its own
+    /// termination to `parent_tx`.
+    ///
+    /// Without this a nested supervisor that escalates simply stops: the parent
+    /// never learns, and keeps a dead handle in its children list forever.
+    pub(crate) fn start_supervised(
+        spec: StatefulSupervisorSpec<W>,
+        parent_tx: mpsc::UnboundedSender<StatefulSupervisorCommand<W>>,
+    ) -> Self {
+        Self::start_inner(spec, Some(parent_tx))
+    }
+
+    fn start_inner(
+        spec: StatefulSupervisorSpec<W>,
+        parent_tx: Option<mpsc::UnboundedSender<StatefulSupervisorCommand<W>>>,
+    ) -> Self {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let name_arc = Arc::new(spec.name.clone());
         let runtime = StatefulSupervisorRuntime::new(spec, control_rx, control_tx.clone());
 
         let runtime_name = Arc::clone(&name_arc);
         tokio::spawn(async move {
-            runtime.run().await;
-            tracing::debug!(name = %*runtime_name, "supervisor stopped");
+            let reason = runtime.run().await;
+            tracing::debug!(name = %*runtime_name, reason = ?reason, "supervisor stopped");
+
+            // A `Shutdown` reason is the parent's own doing and is ignored there;
+            // an abnormal exit is what makes the parent restart this subtree.
+            if let Some(tx) = parent_tx {
+                let _send = tx.send(StatefulSupervisorCommand::ChildTerminated {
+                    id: (*runtime_name).clone(),
+                    reason,
+                });
+            }
         });
 
         Self {

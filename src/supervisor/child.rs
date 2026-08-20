@@ -4,7 +4,7 @@ use super::handle::SupervisorHandle;
 use super::spec::SupervisorSpec;
 use crate::restart::RestartPolicy;
 use crate::types::ChildType;
-use crate::worker::{Worker, WorkerProcess, WorkerSpec};
+use crate::worker::{Worker, WorkerProcess};
 use std::sync::Arc;
 
 /// Represents either a worker or a nested supervisor in the supervision tree
@@ -42,18 +42,26 @@ impl<W: Worker> Child<W> {
         }
     }
 
-    pub async fn shutdown(&mut self) {
+    /// Policy as seen by the shared restart decision: `None` for nested
+    /// supervisors, which are always treated as permanent.
+    #[inline]
+    pub fn restart_policy_for_decision(&self) -> Option<RestartPolicy> {
         match self {
-            Child::Worker(w) => w.stop().await,
+            Child::Worker(w) => Some(w.spec.restart_policy),
+            Child::Supervisor { .. } => None,
+        }
+    }
+
+    /// Stops the child, allowing `timeout` for a worker to wind down
+    /// cooperatively before its task is aborted.
+    pub async fn shutdown(&mut self, timeout: std::time::Duration) {
+        match self {
+            Child::Worker(w) => {
+                let _graceful = w.stop(timeout).await;
+            }
             Child::Supervisor { handle, .. } => {
                 let _shutdown_result = handle.shutdown().await;
             }
         }
     }
-}
-
-/// Holds information needed to restart a child after termination
-pub(crate) enum RestartInfo<W: Worker> {
-    Worker(WorkerSpec<W>),
-    Supervisor(Arc<SupervisorSpec<W>>),
 }

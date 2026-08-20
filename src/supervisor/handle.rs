@@ -10,24 +10,62 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 /// Handle used to interact with a running supervisor tree.
-#[derive(Clone)]
 pub struct SupervisorHandle<W: Worker> {
     pub(crate) name: Arc<String>,
     pub(crate) control_tx: mpsc::UnboundedSender<SupervisorCommand<W>>,
+}
+
+// Hand-written so cloning a handle does not require the worker itself to be
+// `Clone`; a handle is just a name and a channel.
+impl<W: Worker> Clone for SupervisorHandle<W> {
+    fn clone(&self) -> Self {
+        Self {
+            name: Arc::clone(&self.name),
+            control_tx: self.control_tx.clone(),
+        }
+    }
 }
 
 impl<W: Worker> SupervisorHandle<W> {
     /// Spawns a supervisor tree based on the provided specification.
     #[must_use]
     pub fn start(spec: SupervisorSpec<W>) -> Self {
+        Self::start_inner(spec, None)
+    }
+
+    /// Spawns a supervisor as the child of another one, reporting its own
+    /// termination to `parent_tx`.
+    ///
+    /// Without this a nested supervisor that escalates simply stops: the parent
+    /// never learns, and keeps a dead handle in its children list forever.
+    pub(crate) fn start_supervised(
+        spec: SupervisorSpec<W>,
+        parent_tx: mpsc::UnboundedSender<SupervisorCommand<W>>,
+    ) -> Self {
+        Self::start_inner(spec, Some(parent_tx))
+    }
+
+    fn start_inner(
+        spec: SupervisorSpec<W>,
+        parent_tx: Option<mpsc::UnboundedSender<SupervisorCommand<W>>>,
+    ) -> Self {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let name_arc = Arc::new(spec.name.clone());
         let runtime = SupervisorRuntime::new(spec, control_rx, control_tx.clone());
 
         let runtime_name = Arc::clone(&name_arc);
         tokio::spawn(async move {
-            runtime.run().await;
-            tracing::debug!(name = %*runtime_name, "supervisor stopped");
+            let reason = runtime.run().await;
+            tracing::debug!(name = %*runtime_name, reason = ?reason, "supervisor stopped");
+
+            // A `Shutdown` reason is the parent's own doing and is ignored there;
+            // an abnormal exit is what makes the parent restart this subtree.
+            if let Some(tx) = parent_tx {
+                let _send = tx.send(SupervisorCommand::ChildTerminated {
+                    id: (*runtime_name).clone(),
+                    reason,
+                });
+            }
         });
 
         Self {
@@ -47,8 +85,25 @@ impl<W: Worker> SupervisorHandle<W> {
         factory: impl Fn() -> W + Send + Sync + 'static,
         restart_policy: RestartPolicy,
     ) -> Result<ChildId, SupervisorError> {
+        self.start_child_with_signal(id, move |_signal| factory(), restart_policy)
+            .await
+    }
+
+    /// Dynamically starts a child whose factory receives the worker's
+    /// [`ShutdownSignal`](crate::ShutdownSignal), so it can observe cooperative
+    /// termination.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor is shutting down or a child with this ID already exists.
+    pub async fn start_child_with_signal(
+        &self,
+        id: impl Into<String>,
+        factory: impl Fn(crate::ShutdownSignal) -> W + Send + Sync + 'static,
+        restart_policy: RestartPolicy,
+    ) -> Result<ChildId, SupervisorError> {
         let (result_tx, result_rx) = oneshot::channel();
-        let spec = WorkerSpec::new(id, factory, restart_policy);
+        let spec = WorkerSpec::with_signal(id, factory, restart_policy);
 
         self.control_tx
             .send(SupervisorCommand::StartChild {
@@ -92,8 +147,26 @@ impl<W: Worker> SupervisorHandle<W> {
         restart_policy: RestartPolicy,
         timeout: std::time::Duration,
     ) -> Result<ChildId, SupervisorError> {
+        self.start_child_linked_with_signal(id, move |_signal| factory(), restart_policy, timeout)
+            .await
+    }
+
+    /// Like [`SupervisorHandle::start_child_linked`], but the factory receives
+    /// the worker's [`ShutdownSignal`](crate::ShutdownSignal) so the worker can
+    /// observe cooperative termination.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`SupervisorHandle::start_child_linked`].
+    pub async fn start_child_linked_with_signal(
+        &self,
+        id: impl Into<String>,
+        factory: impl Fn(crate::ShutdownSignal) -> W + Send + Sync + 'static,
+        restart_policy: RestartPolicy,
+        timeout: std::time::Duration,
+    ) -> Result<ChildId, SupervisorError> {
         let (result_tx, result_rx) = oneshot::channel();
-        let spec = WorkerSpec::new(id, factory, restart_policy);
+        let spec = WorkerSpec::with_signal(id, factory, restart_policy);
 
         self.control_tx
             .send(SupervisorCommand::StartChildLinked {

@@ -2,6 +2,23 @@
 //!
 //! Allows supervisors to run in separate processes (local) or on remote machines (network).
 //! Commands are serialized with rkyv for minimal overhead.
+//!
+//! # Security
+//!
+//! **This protocol has no authentication, authorization, or encryption.** Any
+//! peer able to open a connection can enumerate children, terminate an
+//! individual child, or shut the whole supervision tree down via
+//! [`RemoteCommand::Shutdown`]. Traffic is sent in the clear.
+//!
+//! Only listen on an interface you fully control. Prefer
+//! [`SupervisorServer::listen_unix`] with restrictive filesystem permissions;
+//! if you use [`SupervisorServer::listen_tcp`], bind to loopback or place the
+//! listener behind an authenticated transport such as a VPN, SSH tunnel, or
+//! mutual-TLS proxy. Do not expose it to an untrusted network.
+//!
+//! Incoming frames are length-bounded and validated before access, so a
+//! malformed payload is rejected as an error rather than causing undefined
+//! behaviour — but validation is not a substitute for access control.
 
 #![allow(missing_docs)]
 
@@ -16,6 +33,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::{ChildInfo as SupervisorChildInfo, ChildType, RestartPolicy, SupervisorHandle, Worker};
+
+/// Maximum accepted frame size (10 MiB).
+///
+/// The length prefix arrives from an untrusted peer, so it is bounded before
+/// allocating to prevent a tiny frame from requesting a huge allocation.
+const MAX_MESSAGE_BYTES: usize = 10_000_000;
 
 /// Remote supervisor address
 #[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -235,6 +258,12 @@ impl<W: Worker> SupervisorServer<W> {
 
     /// Start listening on a Unix socket (Unix only)
     ///
+    /// # Security
+    ///
+    /// Connections are **not authenticated**. Access is governed solely by the
+    /// filesystem permissions on `path`; restrict them to the intended user.
+    /// See the [module documentation](self#security).
+    ///
     /// # Errors
     ///
     /// Returns an error if the socket cannot be bound or a connection fails.
@@ -262,6 +291,13 @@ impl<W: Worker> SupervisorServer<W> {
     }
 
     /// Start listening on a TCP socket
+    ///
+    /// # Security
+    ///
+    /// Connections are **not authenticated or encrypted**. Any peer that can
+    /// reach `addr` may terminate children or shut down the supervision tree.
+    /// Bind to loopback, or front this with an authenticated transport. See the
+    /// [module documentation](self#security).
     ///
     /// # Errors
     ///
@@ -325,7 +361,7 @@ impl<W: Worker> SupervisorServer<W> {
 
                 RemoteResponse::Status(SupervisorStatus {
                     name: handle.name().to_owned(),
-                    children_count: handle.which_children().await.map(|c| c.len()).unwrap_or(0),
+                    children_count: handle.which_children().await.map_or(0, |c| c.len()),
                     restart_strategy,
                     uptime_secs,
                 })
@@ -347,7 +383,10 @@ where
         >,
     >,
 {
-    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(msg)?;
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(msg).map_err(DistributedError::Encode)?;
+    if encoded.len() > MAX_MESSAGE_BYTES {
+        return Err(DistributedError::MessageTooLarge(encoded.len()));
+    }
     let len = u32::try_from(encoded.len())
         .map_err(|_| DistributedError::MessageTooLarge(encoded.len()))?;
 
@@ -359,27 +398,30 @@ where
 }
 
 /// Receive a message from a stream (length-prefixed rkyv)
-#[allow(clippy::as_conversions)]
+///
+/// The payload arrives from a socket and is therefore untrusted: the archive is
+/// validated with bytecheck before access, so a malformed or hostile frame
+/// surfaces as [`DistributedError::Decode`] rather than undefined behaviour.
 async fn receive_message<S, T>(stream: &mut S) -> Result<T, DistributedError>
 where
     S: AsyncReadExt + Unpin,
     T: Archive,
-    for<'a> T::Archived: RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>,
+    T::Archived: RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
 {
     let mut len_bytes = [0u8; 4];
     stream.read_exact(&mut len_bytes).await?;
-    let len = u32::from_be_bytes(len_bytes) as usize;
+    let len = usize::try_from(u32::from_be_bytes(len_bytes))
+        .map_err(|_| DistributedError::MessageTooLarge(usize::MAX))?;
 
-    if len > 10_000_000 {
+    if len > MAX_MESSAGE_BYTES {
         return Err(DistributedError::MessageTooLarge(len));
     }
 
     let mut buffer = vec![0u8; len];
     stream.read_exact(&mut buffer).await?;
 
-    // SAFETY: The buffer contains serialized rkyv data from a trusted source (our own code)
-    let decoded: T = unsafe { rkyv::from_bytes_unchecked::<T, rkyv::rancor::Error>(&buffer)? };
-    Ok(decoded)
+    rkyv::from_bytes::<T, rkyv::rancor::Error>(&buffer).map_err(DistributedError::Decode)
 }
 
 /// Errors that can occur in distributed operations
@@ -422,8 +464,6 @@ impl From<std::io::Error> for DistributedError {
     }
 }
 
-impl From<rkyv::rancor::Error> for DistributedError {
-    fn from(e: rkyv::rancor::Error) -> Self {
-        DistributedError::Encode(e)
-    }
-}
+// No blanket `From<rkyv::rancor::Error>`: encode and decode failures are
+// mapped explicitly at each call site so a decode failure is never reported
+// as an encode failure.
