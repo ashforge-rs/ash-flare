@@ -114,4 +114,7 @@ pub use types::{ChildExitReason, ChildId, ChildInfo, ChildType, ShutdownSignal, 
 pub use worker::{Worker, WorkerFactory};
 
 // Re-export mailbox types
-pub use mailbox::{Mailbox, MailboxConfig, MailboxHandle, SendError, TryRecvError, TrySendError};
+pub use mailbox::{
+    CallError, Mailbox, MailboxConfig, MailboxHandle, Reply, SendError, TryRecvError, TrySendError,
+    mailbox, mailbox_named,
+};
