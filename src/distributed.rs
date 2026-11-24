@@ -24,6 +24,7 @@
 // their own; every hand-written item here is documented.
 #![allow(missing_docs)]
 
+use hmac::{KeyInit, Mac};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -41,6 +42,66 @@ use crate::{ChildInfo, RestartStrategy, SupervisorHandle};
 /// The length prefix arrives from an untrusted peer, so it is bounded before
 /// allocating to prevent a tiny frame from requesting a huge allocation.
 const MAX_MESSAGE_BYTES: usize = 10_000_000;
+
+/// Identifies an ash-flare connection; the first field of [`ClientHello`].
+pub const PROTOCOL_MAGIC: u32 = 0x4153_4846; // "ASHF"
+
+/// Version of the wire protocol. A server answers a client speaking another
+/// version with [`ServerHello::Unsupported`] instead of misreading its frames.
+pub const PROTOCOL_VERSION: u16 = 1;
+
+/// Length of handshake nonces and proofs (an HMAC-SHA256 output).
+const HANDSHAKE_BYTES: usize = 32;
+
+/// First frame a client sends on a new connection.
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
+pub struct ClientHello {
+    /// Always [`PROTOCOL_MAGIC`].
+    pub magic: u32,
+    /// The client's [`PROTOCOL_VERSION`].
+    pub version: u16,
+    /// Random bytes the server must sign to prove it knows the cookie.
+    pub nonce: [u8; HANDSHAKE_BYTES],
+}
+
+/// The server's answer to a [`ClientHello`].
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
+pub enum ServerHello {
+    /// The server needs no authentication; commands may follow.
+    Welcome,
+    /// The server requires the shared cookie.
+    Challenge {
+        /// Random bytes the client must sign.
+        nonce: [u8; HANDSHAKE_BYTES],
+        /// The server's signature over the client's nonce.
+        proof: [u8; HANDSHAKE_BYTES],
+    },
+    /// The server speaks another protocol version.
+    Unsupported {
+        /// The server's [`PROTOCOL_VERSION`].
+        server_version: u16,
+    },
+}
+
+/// The client's signature over the server's nonce, sent after a challenge.
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
+pub struct ClientProof {
+    /// HMAC-SHA256 of the server's nonce under the shared cookie.
+    pub proof: [u8; HANDSHAKE_BYTES],
+}
+
+/// The server's verdict on a [`ClientProof`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
+pub enum AuthResult {
+    /// Commands may follow.
+    Accepted,
+    /// The proof was wrong; the server closes the connection.
+    Rejected,
+}
 
 /// Remote supervisor address
 #[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -112,13 +173,19 @@ pub struct SupervisorStatus {
 /// only happens when the failure came before any part of the reply arrived.
 pub struct RemoteSupervisorHandle {
     address: SupervisorAddress,
+    cookie: Option<Cookie>,
     connection: tokio::sync::Mutex<Option<Connection>>,
 }
 
 impl Clone for RemoteSupervisorHandle {
-    /// The clone talks to the same address over its own connection.
+    /// The clone talks to the same address, with the same cookie, over its own
+    /// connection.
     fn clone(&self) -> Self {
-        Self::new(self.address.clone())
+        Self {
+            address: self.address.clone(),
+            cookie: self.cookie.clone(),
+            connection: tokio::sync::Mutex::new(None),
+        }
     }
 }
 
@@ -139,8 +206,22 @@ impl RemoteSupervisorHandle {
     pub fn new(address: SupervisorAddress) -> Self {
         Self {
             address,
+            cookie: None,
             connection: tokio::sync::Mutex::new(None),
         }
+    }
+
+    /// Authenticates with a shared secret, like an Erlang distribution cookie.
+    ///
+    /// The server must be configured with the same cookie
+    /// ([`SupervisorServer::with_cookie`]). Both sides prove they know it by
+    /// signing a random challenge from the other, so the cookie itself never
+    /// crosses the wire, and a server that cannot prove it is refused.
+    /// Traffic after the handshake is still unencrypted.
+    #[must_use]
+    pub fn with_cookie(mut self, cookie: impl AsRef<[u8]>) -> Self {
+        self.cookie = Some(Cookie::new(cookie.as_ref()));
+        self
     }
 
     /// Creates a handle to a supervisor listening on TCP `addr` (`host:port`).
@@ -185,7 +266,7 @@ impl RemoteSupervisorHandle {
             }
         }
 
-        let mut connection = Connection::open(&self.address).await?;
+        let mut connection = Connection::open(&self.address, self.cookie.as_ref()).await?;
         let response = connection
             .round_trip(&cmd)
             .await
@@ -250,6 +331,7 @@ impl RemoteSupervisorHandle {
 /// Server that wraps a `SupervisorHandle` and accepts remote commands
 pub struct SupervisorServer {
     handle: Arc<SupervisorHandle>,
+    cookie: Option<Cookie>,
 }
 
 impl SupervisorServer {
@@ -258,7 +340,16 @@ impl SupervisorServer {
     pub fn new(handle: SupervisorHandle) -> Self {
         Self {
             handle: Arc::new(handle),
+            cookie: None,
         }
+    }
+
+    /// Requires clients to prove they know this shared secret before any
+    /// command is accepted. See [`RemoteSupervisorHandle::with_cookie`].
+    #[must_use]
+    pub fn with_cookie(mut self, cookie: impl AsRef<[u8]>) -> Self {
+        self.cookie = Some(Cookie::new(cookie.as_ref()));
+        self
     }
 
     /// Start listening on a Unix socket (Unix only)
@@ -286,9 +377,10 @@ impl SupervisorServer {
         loop {
             let (mut stream, _) = listener.accept().await?;
             let handle = Arc::clone(&self.handle);
+            let cookie = self.cookie.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(&mut stream, handle).await {
+                if let Err(e) = Self::handle_connection(&mut stream, handle, cookie).await {
                     tracing::error!(error = %e, "connection error");
                 }
             });
@@ -318,23 +410,28 @@ impl SupervisorServer {
             // for an ACK (Nagle), which stalls request/response traffic.
             let _nodelay = stream.set_nodelay(true);
             let handle = Arc::clone(&self.handle);
+            let cookie = self.cookie.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(&mut stream, handle).await {
+                if let Err(e) = Self::handle_connection(&mut stream, handle, cookie).await {
                     tracing::error!(error = %e, "Connection error");
                 }
             });
         }
     }
 
-    /// Serves commands on one connection until the client closes it.
+    /// Runs the handshake, then serves commands on the connection until the
+    /// client closes it.
     async fn handle_connection<S>(
         stream: &mut S,
         handle: Arc<SupervisorHandle>,
+        cookie: Option<Cookie>,
     ) -> Result<(), DistributedError>
     where
         S: AsyncReadExt + AsyncWriteExt + Unpin,
     {
+        server_handshake(stream, cookie.as_ref()).await?;
+
         loop {
             let command: RemoteCommand = match receive_message(stream).await {
                 Ok(command) => command,
@@ -384,7 +481,6 @@ impl SupervisorServer {
 async fn send_message<S, T>(stream: &mut S, msg: &T) -> Result<(), DistributedError>
 where
     S: AsyncWriteExt + Unpin,
-    T: Serialize,
     for<'a> T: RkyvSerialize<
         rkyv::api::high::HighSerializer<
             rkyv::util::AlignedVec,
@@ -496,17 +592,25 @@ enum Connection {
 }
 
 impl Connection {
-    async fn open(address: &SupervisorAddress) -> Result<Self, DistributedError> {
+    async fn open(
+        address: &SupervisorAddress,
+        cookie: Option<&Cookie>,
+    ) -> Result<Self, DistributedError> {
         match address {
             SupervisorAddress::Tcp(addr) => {
-                let stream = TcpStream::connect(addr).await?;
+                let mut stream = TcpStream::connect(addr).await?;
                 // Requests are written in one go; do not hold them back
                 // waiting for an ACK.
                 stream.set_nodelay(true)?;
+                client_handshake(&mut stream, cookie).await?;
                 Ok(Connection::Tcp(stream))
             }
             #[cfg(unix)]
-            SupervisorAddress::Unix(path) => Ok(Connection::Unix(UnixStream::connect(path).await?)),
+            SupervisorAddress::Unix(path) => {
+                let mut stream = UnixStream::connect(path).await?;
+                client_handshake(&mut stream, cookie).await?;
+                Ok(Connection::Unix(stream))
+            }
             #[cfg(not(unix))]
             SupervisorAddress::Unix(_) => Err(DistributedError::Io(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -521,6 +625,190 @@ impl Connection {
             #[cfg(unix)]
             Connection::Unix(stream) => round_trip(stream, cmd).await,
         }
+    }
+}
+
+/// A shared secret both ends of a connection must know.
+#[derive(Clone)]
+struct Cookie(Arc<[u8]>);
+
+impl Cookie {
+    fn new(secret: &[u8]) -> Self {
+        Self(Arc::from(secret))
+    }
+
+    /// HMAC-SHA256 of `label || nonce` under the cookie. The label keeps the
+    /// server's and the client's proofs apart, so one cannot be replayed as
+    /// the other.
+    fn sign(
+        &self,
+        label: &[u8],
+        nonce: &[u8; HANDSHAKE_BYTES],
+    ) -> Result<[u8; HANDSHAKE_BYTES], DistributedError> {
+        let mac = self.mac(label, nonce)?;
+        Ok(mac.finalize().into_bytes().into())
+    }
+
+    /// Checks `proof` in constant time.
+    fn verify(&self, label: &[u8], nonce: &[u8; HANDSHAKE_BYTES], proof: &[u8]) -> bool {
+        self.mac(label, nonce)
+            .is_ok_and(|mac| mac.verify_slice(proof).is_ok())
+    }
+
+    fn mac(
+        &self,
+        label: &[u8],
+        nonce: &[u8; HANDSHAKE_BYTES],
+    ) -> Result<hmac::Hmac<sha2::Sha256>, DistributedError> {
+        // HMAC accepts keys of any length; the error case is unreachable but
+        // is reported rather than unwrapped.
+        let mut mac = <hmac::Hmac<sha2::Sha256> as KeyInit>::new_from_slice(&self.0)
+            .map_err(|_| DistributedError::AuthenticationFailed("unusable cookie".to_owned()))?;
+        mac.update(label);
+        mac.update(nonce);
+        Ok(mac)
+    }
+}
+
+impl fmt::Debug for Cookie {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Cookie(..)")
+    }
+}
+
+const SERVER_LABEL: &[u8] = b"ash-flare server proof v1";
+const CLIENT_LABEL: &[u8] = b"ash-flare client proof v1";
+
+fn random_nonce() -> Result<[u8; HANDSHAKE_BYTES], DistributedError> {
+    let mut nonce = [0u8; HANDSHAKE_BYTES];
+    getrandom::fill(&mut nonce)
+        .map_err(|e| DistributedError::Io(std::io::Error::other(e.to_string())))?;
+    Ok(nonce)
+}
+
+/// Client side of the handshake: announce the protocol version and, when a
+/// cookie is set, authenticate the server and then itself.
+async fn client_handshake<S>(
+    stream: &mut S,
+    cookie: Option<&Cookie>,
+) -> Result<(), DistributedError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let nonce = random_nonce()?;
+    send_message(
+        stream,
+        &ClientHello {
+            magic: PROTOCOL_MAGIC,
+            version: PROTOCOL_VERSION,
+            nonce,
+        },
+    )
+    .await?;
+
+    let hello: ServerHello = receive_message(stream)
+        .await
+        .map_err(FrameError::into_inner)?;
+    match (hello, cookie) {
+        (ServerHello::Welcome, None) => Ok(()),
+        // Talking to a server that cannot prove it knows the cookie would hand
+        // commands to an impostor.
+        (ServerHello::Welcome, Some(_)) => Err(DistributedError::AuthenticationFailed(
+            "server did not authenticate itself".to_owned(),
+        )),
+        (ServerHello::Challenge { .. }, None) => Err(DistributedError::AuthenticationRequired),
+        (
+            ServerHello::Challenge {
+                nonce: server_nonce,
+                proof,
+            },
+            Some(secret),
+        ) => {
+            if !secret.verify(SERVER_LABEL, &nonce, &proof) {
+                return Err(DistributedError::AuthenticationFailed(
+                    "server proof does not match the cookie".to_owned(),
+                ));
+            }
+            send_message(
+                stream,
+                &ClientProof {
+                    proof: secret.sign(CLIENT_LABEL, &server_nonce)?,
+                },
+            )
+            .await?;
+            match receive_message(stream)
+                .await
+                .map_err(FrameError::into_inner)?
+            {
+                AuthResult::Accepted => Ok(()),
+                AuthResult::Rejected => Err(DistributedError::AuthenticationFailed(
+                    "server rejected the cookie".to_owned(),
+                )),
+            }
+        }
+        (ServerHello::Unsupported { server_version }, _) => {
+            Err(DistributedError::VersionMismatch {
+                client: PROTOCOL_VERSION,
+                server: server_version,
+            })
+        }
+    }
+}
+
+/// Server side of the handshake. Returns an error, and the connection is
+/// closed, unless the client speaks this protocol version and, when a cookie
+/// is set, proves it knows it.
+async fn server_handshake<S>(
+    stream: &mut S,
+    cookie: Option<&Cookie>,
+) -> Result<(), DistributedError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let hello: ClientHello = receive_message(stream)
+        .await
+        .map_err(FrameError::into_inner)?;
+    if hello.magic != PROTOCOL_MAGIC {
+        return Err(DistributedError::UnexpectedResponse);
+    }
+    if hello.version != PROTOCOL_VERSION {
+        send_message(
+            stream,
+            &ServerHello::Unsupported {
+                server_version: PROTOCOL_VERSION,
+            },
+        )
+        .await?;
+        return Err(DistributedError::VersionMismatch {
+            client: hello.version,
+            server: PROTOCOL_VERSION,
+        });
+    }
+
+    let Some(secret) = cookie else {
+        return send_message(stream, &ServerHello::Welcome).await;
+    };
+
+    let nonce = random_nonce()?;
+    send_message(
+        stream,
+        &ServerHello::Challenge {
+            nonce,
+            proof: secret.sign(SERVER_LABEL, &hello.nonce)?,
+        },
+    )
+    .await?;
+
+    let answer: ClientProof = receive_message(stream)
+        .await
+        .map_err(FrameError::into_inner)?;
+    if secret.verify(CLIENT_LABEL, &nonce, &answer.proof) {
+        send_message(stream, &AuthResult::Accepted).await
+    } else {
+        send_message(stream, &AuthResult::Rejected).await?;
+        Err(DistributedError::AuthenticationFailed(
+            "client proof does not match the cookie".to_owned(),
+        ))
     }
 }
 
@@ -548,6 +836,7 @@ where
 
 /// Errors that can occur in distributed operations
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum DistributedError {
     /// I/O error occurred
     Io(std::io::Error),
@@ -561,6 +850,17 @@ pub enum DistributedError {
     UnexpectedResponse,
     /// Message size exceeds maximum allowed
     MessageTooLarge(usize),
+    /// The two ends speak different protocol versions.
+    VersionMismatch {
+        /// The client's protocol version
+        client: u16,
+        /// The server's protocol version
+        server: u16,
+    },
+    /// The server requires a cookie and the client has none.
+    AuthenticationRequired,
+    /// One side failed to prove it knows the shared cookie.
+    AuthenticationFailed(String),
 }
 
 impl fmt::Display for DistributedError {
@@ -573,6 +873,16 @@ impl fmt::Display for DistributedError {
             DistributedError::UnexpectedResponse => write!(f, "Unexpected response from remote"),
             DistributedError::MessageTooLarge(size) => {
                 write!(f, "Message too large: {size} bytes")
+            }
+            DistributedError::VersionMismatch { client, server } => write!(
+                f,
+                "protocol version mismatch: client speaks {client}, server speaks {server}"
+            ),
+            DistributedError::AuthenticationRequired => {
+                write!(f, "server requires a cookie and none was configured")
+            }
+            DistributedError::AuthenticationFailed(reason) => {
+                write!(f, "authentication failed: {reason}")
             }
         }
     }

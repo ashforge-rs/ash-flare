@@ -177,7 +177,9 @@ async fn test_remote_handle_connection() {
 #[cfg(unix)]
 async fn one_shot_status_server(listener: tokio::net::UnixListener, connections: Arc<AtomicUsize>) {
     use ash_flare::RestartStrategy;
-    use ash_flare::distributed::{RemoteCommand, RemoteResponse, SupervisorStatus};
+    use ash_flare::distributed::{
+        ClientHello, RemoteCommand, RemoteResponse, ServerHello, SupervisorStatus,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     loop {
@@ -185,6 +187,19 @@ async fn one_shot_status_server(listener: tokio::net::UnixListener, connections:
             return;
         };
         connections.fetch_add(1, Ordering::SeqCst);
+
+        // Handshake: accept without authentication.
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).await.unwrap();
+        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+        stream.read_exact(&mut body).await.unwrap();
+        rkyv::from_bytes::<ClientHello, rkyv::rancor::Error>(&body).unwrap();
+        let welcome = rkyv::to_bytes::<rkyv::rancor::Error>(&ServerHello::Welcome).unwrap();
+        stream
+            .write_all(&(welcome.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&welcome).await.unwrap();
 
         let mut len = [0u8; 4];
         stream.read_exact(&mut len).await.unwrap();
