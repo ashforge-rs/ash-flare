@@ -188,8 +188,11 @@ python-venv:
 		echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"; \
 		exit 1; \
 	fi
-	@$(UV) venv $(VENV_DIR)
-	@echo "✓ Virtual environment created at $(VENV_DIR)"
+	@if [ -d $(VENV_DIR) ]; then \
+		echo "✓ Reusing existing virtual environment at $(VENV_DIR)"; \
+	else \
+		$(UV) venv $(VENV_DIR) && echo "✓ Virtual environment created at $(VENV_DIR)"; \
+	fi
 	@echo "Installing maturin..."
 	@$(UV) pip install --python $(VENV_DIR) maturin
 	@echo "✓ Maturin installed"
