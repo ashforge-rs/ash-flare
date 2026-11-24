@@ -2,6 +2,7 @@
 
 use crate::panic::CatchUnwind;
 use crate::restart::{BackoffTracker, RestartPolicy, RestartStrategy, RestartTracker};
+use crate::stall::{Monitored, PollMonitor};
 use crate::supervisor::SupervisorCommand;
 use crate::types::{ChildExitReason, ShutdownSignal};
 use crate::worker::DynWorker;
@@ -363,27 +364,54 @@ impl fmt::Display for QualifiedName<'_> {
     }
 }
 
+/// Everything a running worker needs besides the worker itself.
+pub(crate) struct Lifecycle {
+    pub supervisor_name: Arc<str>,
+    pub worker_id: Arc<str>,
+    pub instance: u64,
+    pub control_tx: mpsc::UnboundedSender<SupervisorCommand>,
+    /// Told the outcome of `initialize` when the start is linked.
+    pub init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    pub shutdown: ShutdownSignal,
+    pub poll_monitor: Option<Arc<PollMonitor>>,
+}
+
+/// Wraps a call into user code: panics become errors, and each poll is timed
+/// when stall detection is on.
+fn guard<F: std::future::Future + Unpin>(
+    future: F,
+    monitor: Option<&PollMonitor>,
+) -> CatchUnwind<Monitored<'_, F>> {
+    CatchUnwind(Monitored {
+        inner: future,
+        monitor,
+    })
+}
+
 /// Runs a worker with initialization, execution, and shutdown lifecycle
 ///
 /// When `shutdown` is triggered the worker's `run` future is dropped at its next
 /// await point, but `shutdown` is still awaited so cleanup runs. This is what
 /// makes graceful termination different from aborting the task outright.
-pub(crate) async fn run_worker(
-    supervisor_name: Arc<str>,
-    worker_id: Arc<str>,
-    instance: u64,
-    mut worker: Box<dyn DynWorker>,
-    control_tx: mpsc::UnboundedSender<SupervisorCommand>,
-    init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    shutdown: ShutdownSignal,
-) {
+pub(crate) async fn run_worker(mut worker: Box<dyn DynWorker>, lifecycle: Lifecycle) {
+    let Lifecycle {
+        supervisor_name,
+        worker_id,
+        instance,
+        control_tx,
+        init_tx,
+        shutdown,
+        poll_monitor,
+    } = lifecycle;
+    // Times each poll of the worker when stall detection is on.
+    let monitor = poll_monitor.as_deref();
     // Rendered only when a log line is actually emitted, so a worker spawn
     // does not allocate a "supervisor/worker" string up front.
     let qualified_name = QualifiedName(&supervisor_name, &worker_id);
 
     // Every call into user code is guarded: a panic is reported as a failure
     // like any other, so the supervisor sees the exit and applies its policy.
-    match CatchUnwind(worker.initialize())
+    match guard(worker.initialize(), monitor)
         .await
         .and_then(std::convert::identity)
     {
@@ -424,7 +452,7 @@ pub(crate) async fn run_worker(
             tracing::debug!(worker = %qualified_name, "worker shutdown requested");
             ChildExitReason::Shutdown
         }
-        result = CatchUnwind(worker.run()) => match result.and_then(std::convert::identity) {
+        result = guard(worker.run(), monitor) => match result.and_then(std::convert::identity) {
             Ok(()) => {
                 tracing::debug!(worker = %qualified_name, "worker completed normally");
                 ChildExitReason::Normal
@@ -441,7 +469,7 @@ pub(crate) async fn run_worker(
     };
 
     // Shutdown the worker
-    if let Err(err) = CatchUnwind(worker.shutdown())
+    if let Err(err) = guard(worker.shutdown(), monitor)
         .await
         .and_then(std::convert::identity)
     {

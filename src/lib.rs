@@ -92,6 +92,7 @@ mod events;
 mod link;
 mod panic;
 mod restart;
+mod stall;
 mod supervisor;
 mod supervisor_common;
 mod types;

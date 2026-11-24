@@ -33,6 +33,16 @@ pub enum SupervisorEvent {
         /// Why it terminated.
         reason: ChildExitReason,
     },
+    /// A child has been inside a single poll for longer than the
+    /// supervisor's stall threshold: it is blocking its thread, holding up
+    /// whatever else runs there. Reported once per stall, while it lasts.
+    /// See `SupervisorSpec::with_stall_detection`.
+    ChildStalled {
+        /// The child's id.
+        id: Arc<str>,
+        /// How long it had been stuck when this was noticed.
+        stalled_for: std::time::Duration,
+    },
     /// Children failed more often than the restart intensity allows; the
     /// supervisor is shutting down and escalating to its parent.
     RestartIntensityExceeded,

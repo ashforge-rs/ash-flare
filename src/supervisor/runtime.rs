@@ -6,9 +6,10 @@ use super::handle::SupervisorHandle;
 use super::spec::{AutoShutdown, ChildDef, ShutdownOrder, SupervisorSpec};
 use crate::events::{EventSender, SupervisorEvent, emit};
 use crate::restart::{BackoffTracker, RestartPolicy, RestartStrategy, RestartTracker};
+use crate::stall::StallWatch;
 use crate::supervisor_common::{RestartDecision, decide_restart};
 use crate::types::{ChildExitReason, ChildId, ChildInfo, ChildType};
-use crate::worker::{WorkerProcess, WorkerSpec};
+use crate::worker::{SpawnContext, WorkerProcess, WorkerSpec};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -96,6 +97,8 @@ pub(crate) struct SupervisorRuntime {
     /// Shared with the handle and every worker task, so spawning and
     /// restarting a worker never copies it.
     name: Arc<str>,
+    /// Handed to every worker this supervisor starts.
+    spawn: SpawnContext,
     children: Children,
     control_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
     control_tx: mpsc::UnboundedSender<SupervisorCommand>,
@@ -122,13 +125,20 @@ impl SupervisorRuntime {
         control_tx: mpsc::UnboundedSender<SupervisorCommand>,
         events: EventSender,
     ) -> Self {
+        let spawn = SpawnContext {
+            supervisor_name: Arc::clone(&name),
+            control_tx: control_tx.clone(),
+            stall: spec.stall_threshold.map(|threshold| StallWatch {
+                threshold,
+                events: events.clone(),
+            }),
+        };
         let mut children = Children::with_capacity(spec.children.len());
 
         for child_spec in spec.children {
             match child_spec {
                 ChildDef::Worker(worker_spec) => {
-                    let worker =
-                        WorkerProcess::spawn(worker_spec, Arc::clone(&name), control_tx.clone());
+                    let worker = WorkerProcess::spawn(worker_spec, &spawn);
                     children.push(Child::Worker(worker));
                 }
                 ChildDef::Supervisor(supervisor_spec) => {
@@ -155,6 +165,7 @@ impl SupervisorRuntime {
 
         Self {
             name,
+            spawn,
             children,
             control_rx,
             control_tx,
@@ -280,7 +291,7 @@ impl SupervisorRuntime {
         }
 
         let id = spec.id.to_string();
-        let worker = WorkerProcess::spawn(spec, Arc::clone(&self.name), self.control_tx.clone());
+        let worker = WorkerProcess::spawn(spec, &self.spawn);
 
         self.push_started(Child::Worker(worker));
         tracing::debug!(
@@ -304,12 +315,7 @@ impl SupervisorRuntime {
         let id = spec.id.to_string();
         let (init_tx, init_rx) = oneshot::channel();
 
-        let worker = WorkerProcess::spawn_with_link(
-            spec,
-            Arc::clone(&self.name),
-            self.control_tx.clone(),
-            init_tx,
-        );
+        let worker = WorkerProcess::spawn_with_link(spec, &self.spawn, init_tx);
 
         // Wait for initialization with timeout
         let init_result = tokio::time::timeout(timeout, init_rx).await;
@@ -636,7 +642,7 @@ impl SupervisorRuntime {
         Self::record_stop_into(&mut self.silenced, &self.events, stopped, outcome);
 
         let child = &mut self.children[position];
-        Self::respawn(child, &self.name, &self.control_tx, &self.events);
+        Self::respawn(child, &self.spawn, &self.events);
         tracing::debug!(
             supervisor = %self.name,
             child = %child.id(),
@@ -665,12 +671,7 @@ impl SupervisorRuntime {
 
     /// Replaces a child that has been shut down with a freshly started one of
     /// the same id, in place, so its position and index entry stay valid.
-    fn respawn(
-        child: &mut Child,
-        supervisor_name: &Arc<str>,
-        control_tx: &mpsc::UnboundedSender<SupervisorCommand>,
-        events: &EventSender,
-    ) {
+    fn respawn(child: &mut Child, spawn: &SpawnContext, events: &EventSender) {
         emit(
             events,
             SupervisorEvent::ChildRestarted {
@@ -680,16 +681,12 @@ impl SupervisorRuntime {
         match child {
             Child::Worker(worker) => {
                 let spec = worker.spec.clone();
-                *child = Child::Worker(WorkerProcess::spawn(
-                    spec,
-                    Arc::clone(supervisor_name),
-                    control_tx.clone(),
-                ));
+                *child = Child::Worker(WorkerProcess::spawn(spec, spawn));
             }
             Child::Supervisor { spec, .. } => {
                 let spec = Arc::clone(spec);
                 let handle =
-                    SupervisorHandle::start_supervised((*spec).clone(), control_tx.clone());
+                    SupervisorHandle::start_supervised((*spec).clone(), spawn.control_tx.clone());
                 *child = Child::Supervisor { handle, spec };
             }
         }
@@ -741,7 +738,7 @@ impl SupervisorRuntime {
                 continue;
             }
 
-            Self::respawn(child, &self.name, &self.control_tx, &self.events);
+            Self::respawn(child, &self.spawn, &self.events);
             tracing::debug!(
                 supervisor = %self.name,
                 child = %child.id(),

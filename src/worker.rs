@@ -2,7 +2,7 @@
 
 use crate::restart::RestartPolicy;
 use crate::supervisor::SupervisorCommand;
-use crate::supervisor_common::run_worker;
+use crate::supervisor_common::{Lifecycle, run_worker};
 use crate::types::ShutdownSignal;
 use std::fmt;
 use std::future::Future;
@@ -153,6 +153,8 @@ pub(crate) struct WorkerSpec {
     pub shutdown: Option<crate::supervisor::Shutdown>,
     /// Whether this child ending on its own can shut its supervisor down.
     pub significant: bool,
+    /// Whether the worker runs on a thread of its own.
+    pub isolated: bool,
 }
 
 impl WorkerSpec {
@@ -167,6 +169,7 @@ impl WorkerSpec {
             restart_policy,
             shutdown: None,
             significant: false,
+            isolated: false,
         }
     }
 
@@ -182,7 +185,106 @@ impl fmt::Debug for WorkerSpec {
             .field("restart_policy", &self.restart_policy)
             .field("shutdown", &self.shutdown)
             .field("significant", &self.significant)
+            .field("isolated", &self.isolated)
             .finish_non_exhaustive()
+    }
+}
+
+/// Reports a worker as having failed when it could not even be run, so its
+/// supervisor is never left waiting for an exit report that will not come.
+struct FailureReport {
+    control_tx: mpsc::UnboundedSender<SupervisorCommand>,
+    id: Arc<str>,
+    instance: u64,
+}
+
+impl FailureReport {
+    fn send(self, why: &str) {
+        tracing::error!(worker = %self.id, error = %why, "isolated worker could not run");
+        let _sent = self.control_tx.send(SupervisorCommand::ChildTerminated {
+            id: self.id,
+            instance: self.instance,
+            reason: crate::types::ChildExitReason::Abnormal,
+        });
+    }
+}
+
+/// Runs a worker's whole lifecycle on a thread of its own, with its own
+/// single-threaded runtime, so a worker that blocks its thread or burns CPU
+/// cannot starve the shared runtime's threads.
+///
+/// This future stands in for the worker on the shared runtime: it finishes when
+/// the worker does, and dropping it (the supervisor aborting the worker) makes
+/// the isolated runtime drop the worker's future at its next await point, as
+/// aborting an ordinary task would. A worker stuck in a loop that never awaits
+/// cannot be interrupted; it keeps its thread until it yields, but nothing else
+/// is held up meanwhile.
+async fn run_isolated(
+    lifecycle: impl Future<Output = ()> + Send + 'static,
+    failure: FailureReport,
+) {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
+    let name = format!("ash-flare:{}", failure.id);
+
+    // Kept outside the thread so it can still report a failure to start it.
+    let report_slot = std::sync::Arc::new(std::sync::Mutex::new(Some(failure)));
+    let thread_report = std::sync::Arc::clone(&report_slot);
+    let spawned = std::thread::Builder::new().name(name).spawn(move || {
+        let outcome = crate::panic::catch(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async {
+                tokio::select! {
+                    biased;
+                    _ = abort_rx => {}
+                    () = lifecycle => {}
+                }
+            });
+            Ok::<(), std::io::Error>(())
+        });
+        let problem = match outcome {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(format!("could not build its runtime: {e}")),
+            Err(panic) => Some(panic),
+        };
+        if let Some(why) = problem
+            && let Some(report) = take(&thread_report)
+        {
+            report.send(&why);
+        }
+        let _finished = done_tx.send(());
+    });
+
+    match spawned {
+        Ok(_thread) => {
+            // The lifecycle sends the exit report itself from here on.
+            drop(take(&report_slot));
+            let _abort_when_dropped = AbortOnDrop(Some(abort_tx));
+            let _finished = done_rx.await;
+        }
+        Err(e) => {
+            if let Some(report) = take(&report_slot) {
+                report.send(&format!("could not spawn its thread: {e}"));
+            }
+        }
+    }
+}
+
+fn take(slot: &std::sync::Mutex<Option<FailureReport>>) -> Option<FailureReport> {
+    slot.lock().map_or(None, |mut report| report.take())
+}
+
+/// Tells an isolated worker's thread to drop the worker when the stand-in
+/// future on the shared runtime is dropped.
+struct AbortOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(abort) = self.0.take() {
+            let _sent = abort.send(());
+        }
     }
 }
 
@@ -219,31 +321,35 @@ pub(crate) struct WorkerProcess {
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
+/// What a supervisor hands every worker it starts.
+#[derive(Clone)]
+pub(crate) struct SpawnContext {
+    pub supervisor_name: Arc<str>,
+    pub control_tx: mpsc::UnboundedSender<SupervisorCommand>,
+    /// Set when the supervisor reports workers that block their thread.
+    pub stall: Option<crate::stall::StallWatch>,
+}
+
 impl WorkerProcess {
-    pub(crate) fn spawn(
-        spec: WorkerSpec,
-        supervisor_name: Arc<str>,
-        control_tx: mpsc::UnboundedSender<SupervisorCommand>,
-    ) -> Self {
-        Self::spawn_inner(spec, supervisor_name, control_tx, None)
+    pub(crate) fn spawn(spec: WorkerSpec, ctx: &SpawnContext) -> Self {
+        Self::spawn_inner(spec, ctx, None)
     }
 
     /// Spawns a worker with linked initialization handshake
     pub(crate) fn spawn_with_link(
         spec: WorkerSpec,
-        supervisor_name: Arc<str>,
-        control_tx: mpsc::UnboundedSender<SupervisorCommand>,
+        ctx: &SpawnContext,
         init_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) -> Self {
-        Self::spawn_inner(spec, supervisor_name, control_tx, Some(init_tx))
+        Self::spawn_inner(spec, ctx, Some(init_tx))
     }
 
     fn spawn_inner(
         spec: WorkerSpec,
-        supervisor_name: Arc<str>,
-        control_tx: mpsc::UnboundedSender<SupervisorCommand>,
+        ctx: &SpawnContext,
         init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     ) -> Self {
+        let control_tx = ctx.control_tx.clone();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         // The factory is user code running on the supervisor's own task; a
         // panic there must fail this child's start, not the supervisor.
@@ -254,15 +360,32 @@ impl WorkerProcess {
         let signal = ShutdownSignal::new(shutdown_rx);
         let instance = crate::events::next_instance();
 
-        let handle = tokio::spawn(run_worker(
-            supervisor_name,
-            worker_id,
+        let failure_report = FailureReport {
+            control_tx: control_tx.clone(),
+            id: Arc::clone(&worker_id),
             instance,
+        };
+        let monitor = ctx
+            .stall
+            .as_ref()
+            .map(|watch| crate::stall::PollMonitor::watch(Arc::clone(&worker_id), watch));
+        let lifecycle = run_worker(
             worker,
-            control_tx,
-            init_tx,
-            signal,
-        ));
+            Lifecycle {
+                supervisor_name: Arc::clone(&ctx.supervisor_name),
+                worker_id,
+                instance,
+                control_tx,
+                init_tx,
+                shutdown: signal,
+                poll_monitor: monitor,
+            },
+        );
+        let handle = if spec.isolated {
+            tokio::spawn(run_isolated(lifecycle, failure_report))
+        } else {
+            tokio::spawn(lifecycle)
+        };
 
         Self {
             spec,

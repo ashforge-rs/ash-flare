@@ -129,6 +129,25 @@ impl ChildSpec {
         self
     }
 
+    /// Runs the worker on a thread of its own, with its own single-threaded
+    /// tokio runtime.
+    ///
+    /// Async Rust cannot preempt a task the way the BEAM preempts a process:
+    /// a worker that blocks its thread, or computes for a long time without
+    /// awaiting, holds up every other task on that runtime thread. An isolated
+    /// worker only ever holds up its own thread. Use it for workers that call
+    /// blocking APIs or do heavy computation.
+    ///
+    /// Stopping, killing and restarting work as for any worker. Tasks the
+    /// worker spawns run on its own runtime and end with it. A worker stuck in
+    /// a loop that never awaits still cannot be interrupted: it is reported as
+    /// killed and replaced, while its old thread runs on until it yields.
+    #[must_use]
+    pub fn isolated(mut self, isolated: bool) -> Self {
+        self.worker.isolated = isolated;
+        self
+    }
+
     /// The child's id.
     #[must_use]
     pub fn id(&self) -> &str {
@@ -170,6 +189,7 @@ pub struct SupervisorSpec {
     pub(crate) shutdown_timeout: Duration,
     pub(crate) shutdown_order: ShutdownOrder,
     pub(crate) auto_shutdown: AutoShutdown,
+    pub(crate) stall_threshold: Option<Duration>,
     /// How this supervisor is restarted when it is the child of another.
     pub(crate) restart_policy: RestartPolicy,
 }
@@ -189,6 +209,7 @@ impl SupervisorSpec {
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             shutdown_order: ShutdownOrder::default(),
             auto_shutdown: AutoShutdown::default(),
+            stall_threshold: None,
             restart_policy: RestartPolicy::Permanent,
         }
     }
@@ -299,6 +320,23 @@ impl SupervisorSpec {
     #[must_use]
     pub fn with_shutdown_order(mut self, order: ShutdownOrder) -> Self {
         self.shutdown_order = order;
+        self
+    }
+
+    /// Reports workers that block their thread for longer than `threshold`,
+    /// like Erlang's `system_monitor(long_schedule)`.
+    ///
+    /// Async Rust cannot preempt a task: a worker that blocks or computes for
+    /// a long time without awaiting holds up every other task on its runtime
+    /// thread. With this set, each poll of this supervisor's workers is timed,
+    /// and one stuck in a poll past `threshold` is reported, while it is still
+    /// stuck, as [`SupervisorEvent::ChildStalled`](crate::SupervisorEvent) and
+    /// a warning log. Move such workers to their own thread with
+    /// [`ChildSpec::isolated`]. Off by default; when on, it costs a clock read
+    /// per poll.
+    #[must_use]
+    pub fn with_stall_detection(mut self, threshold: Duration) -> Self {
+        self.stall_threshold = Some(threshold);
         self
     }
 
