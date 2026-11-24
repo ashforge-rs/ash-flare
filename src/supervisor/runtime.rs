@@ -34,6 +34,11 @@ pub(crate) enum SupervisorCommand {
         id: ChildId,
         respond_to: oneshot::Sender<Result<(), SupervisorError>>,
     },
+    /// Kills a child so that its restart policy applies.
+    KillChild {
+        id: ChildId,
+        respond_to: oneshot::Sender<Result<bool, SupervisorError>>,
+    },
     WhichChildren {
         respond_to: oneshot::Sender<Vec<ChildInfo>>,
     },
@@ -193,6 +198,13 @@ impl SupervisorRuntime {
                 } => {
                     let result = self.handle_start_child_linked(spec, timeout).await;
                     let _send = respond_to.send(result);
+                }
+                SupervisorCommand::KillChild { id, respond_to } => {
+                    let (result, control) = self.handle_kill_child(&id).await;
+                    let _send = respond_to.send(result);
+                    if let RuntimeControl::Exit(exit) = control {
+                        return exit;
+                    }
                 }
                 SupervisorCommand::TerminateChild { id, respond_to } => {
                     let result = self.handle_terminate_child(&id).await;
@@ -374,6 +386,57 @@ impl SupervisorRuntime {
         Ok(())
     }
 
+    /// Kills a child's current instance and handles it as an exit with
+    /// [`ChildExitReason::Killed`], so its restart policy applies.
+    async fn handle_kill_child(
+        &mut self,
+        id: &str,
+    ) -> (Result<bool, SupervisorError>, RuntimeControl) {
+        let Some(position) = self.children.position(id) else {
+            return (
+                Err(SupervisorError::ChildNotFound(id.to_owned())),
+                RuntimeControl::Continue,
+            );
+        };
+
+        let instance = self.children[position].instance();
+        let killed = match &mut self.children[position] {
+            Child::Worker(worker) => worker.kill().await,
+            Child::Supervisor { handle, .. } => {
+                if handle.is_stopped() {
+                    false
+                } else {
+                    if let Some(done) = handle.begin_shutdown() {
+                        let _stopped = done.await;
+                    }
+                    true
+                }
+            }
+        };
+        if !killed {
+            // It had already exited; its own report decides what happens.
+            return (Ok(false), RuntimeControl::Continue);
+        }
+        // A nested supervisor still reports its stop; that report is ours.
+        if self.children[position].child_type() == ChildType::Supervisor {
+            self.silenced.insert(instance);
+        }
+
+        let key = Arc::clone(self.children[position].key());
+        tracing::debug!(supervisor = %self.name, child = %key, "killed child");
+        emit(
+            &self.events,
+            SupervisorEvent::ChildTerminated {
+                id: Arc::clone(&key),
+                reason: ChildExitReason::Killed,
+            },
+        );
+        let control = self
+            .on_child_exit(position, key, ChildExitReason::Killed)
+            .await;
+        (Ok(true), control)
+    }
+
     fn handle_which_children(&self) -> Vec<ChildInfo> {
         self.children
             .iter()
@@ -428,6 +491,17 @@ impl SupervisorRuntime {
             },
         );
 
+        self.on_child_exit(position, id, reason).await
+    }
+
+    /// Applies the restart decision for the current instance of the child at
+    /// `position`, which has terminated with `reason`.
+    async fn on_child_exit(
+        &mut self,
+        position: usize,
+        id: Arc<str>,
+        reason: ChildExitReason,
+    ) -> RuntimeControl {
         // A nested supervisor reporting `Shutdown` about its current instance
         // was not stopped by this supervisor (that would make the report
         // stale): it shut itself down through its auto_shutdown, which counts

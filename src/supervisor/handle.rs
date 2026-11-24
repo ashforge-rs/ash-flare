@@ -254,6 +254,26 @@ impl SupervisorHandle {
         .await?
     }
 
+    /// Kills a child, as Erlang's `exit(Pid, kill)` does: its task is aborted
+    /// without its `shutdown` hook, and the supervisor handles it like a crash
+    /// with [`ChildExitReason::Killed`](crate::ChildExitReason::Killed), so the
+    /// child's restart policy and the restart intensity apply.
+    ///
+    /// Unlike [`terminate_child`](Self::terminate_child), which removes the
+    /// child for good, this is a failure the supervisor recovers from. Returns
+    /// `false` if the child had already exited by itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the child is not found or the supervisor is shutting down.
+    pub async fn kill_child(&self, id: &str) -> Result<bool, SupervisorError> {
+        self.request(|respond_to| SupervisorCommand::KillChild {
+            id: id.to_owned(),
+            respond_to,
+        })
+        .await?
+    }
+
     /// Returns information about all children
     ///
     /// # Errors

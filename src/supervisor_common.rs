@@ -62,7 +62,9 @@ pub(crate) fn decide_restart(
     let should_restart = match policy {
         None | Some(RestartPolicy::Permanent) => true,
         Some(RestartPolicy::Temporary) => false,
-        Some(RestartPolicy::Transient) => reason == ChildExitReason::Abnormal,
+        Some(RestartPolicy::Transient) => {
+            matches!(reason, ChildExitReason::Abnormal | ChildExitReason::Killed)
+        }
     };
 
     if !should_restart {

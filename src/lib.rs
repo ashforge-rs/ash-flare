@@ -89,6 +89,7 @@ mod readme_doctests {}
 mod macros;
 
 mod events;
+mod link;
 mod panic;
 mod restart;
 mod supervisor;
@@ -107,6 +108,7 @@ pub mod python;
 
 // Re-export public API
 pub use events::SupervisorEvent;
+pub use link::{Link, link};
 pub use registry::{Registration, Registry, RegistryError};
 pub use restart::{RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy};
 pub use supervisor::{

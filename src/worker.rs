@@ -301,6 +301,25 @@ impl WorkerProcess {
         false
     }
 
+    /// Kills the worker outright, as Erlang's `exit(Pid, kill)` does.
+    ///
+    /// Returns `true` if it was still running and has been killed, in which
+    /// case it sends no exit report. Returns `false` if it had already
+    /// finished; its own exit report is then on its way.
+    pub(crate) async fn kill(&mut self) -> bool {
+        let Some(handle) = self.handle.take() else {
+            return false;
+        };
+        if handle.is_finished() {
+            let _join_result = handle.await;
+            return false;
+        }
+        handle.abort();
+        // A worker that finished between the check and the abort completes
+        // normally here and has reported itself.
+        matches!(handle.await, Err(e) if e.is_cancelled())
+    }
+
     /// Waits for a worker that was already sent [`request_stop`](Self::request_stop)
     /// to finish, aborting it if it is still running at `deadline`. `None`
     /// waits indefinitely.
