@@ -253,21 +253,29 @@ impl BackoffTracker {
     /// crashes that are long past.
     pub(crate) fn next_delay(&mut self, id: &str) -> Duration {
         let now = Instant::now();
-        let healthy_after = self.backoff.max_delay;
 
-        let state = self
-            .state
-            .entry(id.to_owned())
-            .or_insert_with(|| BackoffState {
-                attempts: 0,
-                started_at: now,
-            });
+        // Look the child up by `&str` first: `entry` would need an owned key,
+        // allocating a `String` on every restart just to find an existing one.
+        if let Some(state) = self.state.get_mut(id) {
+            return Self::advance(self.backoff, state, now);
+        }
 
-        if now.saturating_duration_since(state.started_at) >= healthy_after {
+        let mut state = BackoffState {
+            attempts: 0,
+            started_at: now,
+        };
+        let delay = Self::advance(self.backoff, &mut state, now);
+        self.state.insert(id.to_owned(), state);
+        delay
+    }
+
+    /// Computes the delay for one more restart and updates `state` for it.
+    fn advance(backoff: RestartBackoff, state: &mut BackoffState, now: Instant) -> Duration {
+        if now.saturating_duration_since(state.started_at) >= backoff.max_delay {
             state.attempts = 0;
         }
 
-        let delay = self.backoff.delay_for_attempt(state.attempts);
+        let delay = backoff.delay_for_attempt(state.attempts);
         state.attempts = state.attempts.saturating_add(1);
         // The replacement child only starts once the backoff elapses; measuring
         // uptime from then is what makes "has it been healthy" meaningful.

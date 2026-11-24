@@ -77,7 +77,9 @@ enum RuntimeControl {
 
 /// Internal state machine that manages supervisor lifecycle and child processes
 pub(crate) struct SupervisorRuntime {
-    name: String,
+    /// Shared with the handle and every worker task, so spawning and
+    /// restarting a worker never copies it.
+    name: Arc<str>,
     children: Vec<Child>,
     control_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
     control_tx: mpsc::UnboundedSender<SupervisorCommand>,
@@ -91,6 +93,7 @@ pub(crate) struct SupervisorRuntime {
 impl SupervisorRuntime {
     pub(crate) fn new(
         spec: SupervisorSpec,
+        name: Arc<str>,
         control_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
         control_tx: mpsc::UnboundedSender<SupervisorCommand>,
     ) -> Self {
@@ -100,7 +103,7 @@ impl SupervisorRuntime {
             match child_spec {
                 ChildSpec::Worker(worker_spec) => {
                     let worker =
-                        WorkerProcess::spawn(worker_spec, spec.name.clone(), control_tx.clone());
+                        WorkerProcess::spawn(worker_spec, Arc::clone(&name), control_tx.clone());
                     children.push(Child::Worker(worker));
                 }
                 ChildSpec::Supervisor(supervisor_spec) => {
@@ -117,7 +120,7 @@ impl SupervisorRuntime {
         }
 
         Self {
-            name: spec.name,
+            name,
             children,
             control_rx,
             control_tx,
@@ -204,7 +207,7 @@ impl SupervisorRuntime {
         }
 
         let id = spec.id.clone();
-        let worker = WorkerProcess::spawn(spec, self.name.clone(), self.control_tx.clone());
+        let worker = WorkerProcess::spawn(spec, Arc::clone(&self.name), self.control_tx.clone());
 
         self.children.push(Child::Worker(worker));
         tracing::debug!(
@@ -231,7 +234,7 @@ impl SupervisorRuntime {
 
         let worker = WorkerProcess::spawn_with_link(
             spec,
-            self.name.clone(),
+            Arc::clone(&self.name),
             self.control_tx.clone(),
             init_tx,
         );
@@ -494,7 +497,7 @@ impl SupervisorRuntime {
     /// returning its id.
     fn respawn(
         child: &mut Child,
-        supervisor_name: &str,
+        supervisor_name: &Arc<str>,
         control_tx: &mpsc::UnboundedSender<SupervisorCommand>,
     ) -> ChildId {
         match child {
@@ -503,7 +506,7 @@ impl SupervisorRuntime {
                 let id = spec.id.clone();
                 *child = Child::Worker(WorkerProcess::spawn(
                     spec,
-                    supervisor_name.to_owned(),
+                    Arc::clone(supervisor_name),
                     control_tx.clone(),
                 ));
                 id

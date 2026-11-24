@@ -4,6 +4,8 @@ use crate::restart::{BackoffTracker, RestartPolicy, RestartStrategy, RestartTrac
 use crate::supervisor::SupervisorCommand;
 use crate::types::{ChildExitReason, ChildId, ShutdownSignal};
 use crate::worker::DynWorker;
+use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -349,20 +351,31 @@ mod tests {
     }
 }
 
+/// Displays as `supervisor/worker` without allocating.
+struct QualifiedName<'a>(&'a str, &'a str);
+
+impl fmt::Display for QualifiedName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.0, self.1)
+    }
+}
+
 /// Runs a worker with initialization, execution, and shutdown lifecycle
 ///
 /// When `shutdown` is triggered the worker's `run` future is dropped at its next
 /// await point, but `shutdown` is still awaited so cleanup runs. This is what
 /// makes graceful termination different from aborting the task outright.
 pub(crate) async fn run_worker(
-    supervisor_name: String,
+    supervisor_name: Arc<str>,
     worker_id: ChildId,
     mut worker: Box<dyn DynWorker>,
     control_tx: mpsc::UnboundedSender<SupervisorCommand>,
     init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     shutdown: ShutdownSignal,
 ) {
-    let qualified_name = format!("{supervisor_name}/{worker_id}");
+    // Rendered only when a log line is actually emitted, so a worker spawn
+    // does not allocate a "supervisor/worker" string up front.
+    let qualified_name = QualifiedName(&supervisor_name, &worker_id);
 
     // Initialize the worker
     match worker.initialize().await {

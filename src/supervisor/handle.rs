@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 /// Cloning a handle is cheap; every clone talks to the same supervisor.
 #[derive(Clone)]
 pub struct SupervisorHandle {
-    pub(crate) name: Arc<String>,
+    pub(crate) name: Arc<str>,
     pub(crate) control_tx: mpsc::UnboundedSender<SupervisorCommand>,
 }
 
@@ -45,19 +45,20 @@ impl SupervisorHandle {
         parent_tx: Option<mpsc::UnboundedSender<SupervisorCommand>>,
     ) -> Self {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
-        let name_arc = Arc::new(spec.name.clone());
-        let runtime = SupervisorRuntime::new(spec, control_rx, control_tx.clone());
+        let name_arc: Arc<str> = Arc::from(spec.name.as_str());
+        let runtime =
+            SupervisorRuntime::new(spec, Arc::clone(&name_arc), control_rx, control_tx.clone());
 
         let runtime_name = Arc::clone(&name_arc);
         tokio::spawn(async move {
             let reason = runtime.run().await;
-            tracing::debug!(name = %*runtime_name, reason = ?reason, "supervisor stopped");
+            tracing::debug!(name = %runtime_name, reason = ?reason, "supervisor stopped");
 
             // A `Shutdown` reason is the parent's own doing and is ignored there;
             // an abnormal exit is what makes the parent restart this subtree.
             if let Some(tx) = parent_tx {
                 let _send = tx.send(SupervisorCommand::ChildTerminated {
-                    id: (*runtime_name).clone(),
+                    id: runtime_name.to_string(),
                     reason,
                 });
             }
@@ -198,7 +199,7 @@ impl SupervisorHandle {
     /// Returns the supervisor's name.
     #[must_use]
     pub fn name(&self) -> &str {
-        self.name.as_str()
+        &self.name
     }
 
     /// Returns `true` once the supervisor has stopped and no longer accepts

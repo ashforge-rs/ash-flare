@@ -192,7 +192,7 @@ pub(crate) struct WorkerProcess {
 impl WorkerProcess {
     pub(crate) fn spawn(
         spec: WorkerSpec,
-        supervisor_name: String,
+        supervisor_name: Arc<str>,
         control_tx: mpsc::UnboundedSender<SupervisorCommand>,
     ) -> Self {
         Self::spawn_inner(spec, supervisor_name, control_tx, None)
@@ -201,7 +201,7 @@ impl WorkerProcess {
     /// Spawns a worker with linked initialization handshake
     pub(crate) fn spawn_with_link(
         spec: WorkerSpec,
-        supervisor_name: String,
+        supervisor_name: Arc<str>,
         control_tx: mpsc::UnboundedSender<SupervisorCommand>,
         init_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) -> Self {
@@ -210,7 +210,7 @@ impl WorkerProcess {
 
     fn spawn_inner(
         spec: WorkerSpec,
-        supervisor_name: String,
+        supervisor_name: Arc<str>,
         control_tx: mpsc::UnboundedSender<SupervisorCommand>,
         init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     ) -> Self {
