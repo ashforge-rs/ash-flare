@@ -314,7 +314,10 @@ impl WorkerContext {
     {
         match self.store.entry(key.to_owned()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                let old_value = entry.get().clone();
+                // Move the value out rather than cloning it: a clone costs time
+                // proportional to the value's size, all while this shard's lock
+                // is held. If `f` panics the key is left holding `null`.
+                let old_value = std::mem::take(entry.get_mut());
                 match f(Some(old_value)) {
                     Some(new_value) => {
                         entry.insert(new_value);
