@@ -41,9 +41,10 @@ pub struct PyWorker {
     /// Cooperative shutdown signal from the supervisor. Python workers poll it
     /// through the `should_stop` argument they are handed.
     pub(crate) shutdown: ShutdownSignal,
-    /// The in-flight Python call. A `spawn_blocking` task cannot be cancelled,
-    /// so this is kept across a cancellation of `run` and joined in `shutdown`.
-    body: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    /// The outcome of the in-flight Python call. The call runs on a thread of
+    /// its own and cannot be cancelled, so this is kept across a cancellation
+    /// of `run` and waited for in `shutdown`.
+    body: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
 }
 
 impl PyWorker {
@@ -82,7 +83,7 @@ impl PyWorker {
 #[derive(Clone)]
 pub struct PyShouldStop {
     /// Read directly, so no task is needed to mirror it into a flag: the
-    /// worker body runs on a blocking thread and simply polls this.
+    /// worker body runs on a thread of its own and simply polls this.
     signal: ShutdownSignal,
 }
 
@@ -114,14 +115,17 @@ impl Worker for PyWorker {
         let callable = Arc::clone(&self.callable);
         let name = self.name.clone();
         let args = self.args.clone();
-        // The worker body runs on a blocking thread that cannot be preempted,
+        // The worker body runs on a thread of its own that cannot be preempted,
         // so polling this signal is the only way to ask it to stop.
         let signal = self.shutdown.clone();
 
-        // Run the Python callable on a blocking-pool thread. `spawn_blocking`
-        // is used on its own here: spawning a bare OS thread as well would
-        // double the per-worker thread cost for no benefit.
-        self.body = Some(tokio::task::spawn_blocking(move || {
+        // Run the Python callable on a thread of its own. A worker typically
+        // runs for its whole life, so it must not occupy tokio's blocking pool,
+        // whose 512 threads would otherwise cap the number of Python workers
+        // with no error for the ones left waiting.
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let thread_name = format!("ash-flare-py:{name}");
+        let call = move || {
             Python::attach(|py| {
                 let should_stop = PyShouldStop { signal };
                 let outcome = match &args {
@@ -142,40 +146,44 @@ impl Worker for PyWorker {
                     format!("worker '{name}' raised: {detail}")
                 })
             })
-        }));
+        };
+        std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                let _delivered = result_tx.send(call());
+            })
+            .map_err(|e| format!("could not start the worker's thread: {e}"))?;
+        self.body = Some(result_rx);
 
-        // The handle stays in `self` while the call is in flight. If this future
-        // is dropped for a cooperative shutdown, `shutdown` joins it there
-        // rather than leaving the Python callable running unsupervised.
-        let Some(handle) = self.body.as_mut() else {
+        // The receiver stays in `self` while the call is in flight. If this
+        // future is dropped for a cooperative shutdown, `shutdown` waits for
+        // it there rather than leaving the Python callable running unsupervised.
+        let Some(outcome) = self.body.as_mut() else {
             return Err("worker body handle went missing".to_owned());
         };
-        let result = handle.await;
+        let result = outcome.await;
         self.body = None;
 
-        match result {
-            Ok(inner) => inner,
-            Err(join_err) => Err(format!("worker task failed to run: {join_err}")),
-        }
+        result.unwrap_or_else(|_| Err("worker thread ended without a result".to_owned()))
     }
 
     /// Waits for a Python callable that is still running after `run` was
     /// cancelled.
     ///
-    /// `spawn_blocking` work cannot be interrupted, so simply returning here
+    /// A running Python call cannot be interrupted, so simply returning here
     /// would report a graceful stop while the callable kept running - and the
     /// supervisor would start its replacement on top of it. Blocking instead
     /// puts the wait inside the supervisor's shutdown timeout: a worker that
     /// polls `should_stop` returns promptly, and one that ignores it is aborted
     /// and correctly reported as not having stopped gracefully.
     async fn shutdown(&mut self) -> Result<(), Self::Error> {
-        let Some(handle) = self.body.take() else {
+        let Some(outcome) = self.body.take() else {
             return Ok(());
         };
 
         // `run` is only cancelled once shutdown has been signalled, so the
         // body already sees `should_stop` as set.
-        let _joined = handle.await;
+        let _finished = outcome.await;
         Ok(())
     }
 }

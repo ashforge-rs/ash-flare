@@ -207,6 +207,10 @@ impl PyChildExitReason {
     fn is_shutdown(&self) -> bool {
         matches!(self.inner, ChildExitReason::Shutdown)
     }
+
+    fn is_killed(&self) -> bool {
+        matches!(self.inner, ChildExitReason::Killed)
+    }
 }
 
 /// Python-facing child info

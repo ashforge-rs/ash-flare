@@ -252,4 +252,5 @@ python-test: python-dev
 	@$(PYTHON) -c "from ash_flare import RestartStrategy; print('✓ RestartStrategy imported')"
 	@$(PYTHON) -c "from ash_flare import SupervisorSpec; print('✓ SupervisorSpec imported')"
 	@$(PYTHON) python/tests/test_worker_semantics.py
+	@$(PYTHON) python/tests/test_supervision_features.py
 	@echo "✓ All Python binding tests passed"

@@ -13,7 +13,7 @@ Stateful supervisors additionally pass their shared context first:
 - ``def worker(ctx: WorkerContext, should_stop: ShouldStop) -> None``
 """
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 version: str
 __version__: str
@@ -67,6 +67,8 @@ class ChildExitReason:
     def is_normal(self) -> bool: ...
     def is_abnormal(self) -> bool: ...
     def is_shutdown(self) -> bool: ...
+    def is_killed(self) -> bool:
+        """Stopped by being aborted: killed, or past its shutdown timeout."""
 
 class ChildInfo:
     """A child's registered identity and policy."""
@@ -96,6 +98,77 @@ class WorkerContext:
     def contains_key(self, key: str) -> bool: ...
     def len(self) -> int: ...
     def is_empty(self) -> bool: ...
+
+class Shutdown:
+    """How a child is stopped when its supervisor terminates it."""
+
+    @staticmethod
+    def brutal_kill() -> Shutdown:
+        """Abandon the worker at once."""
+
+    @staticmethod
+    def timeout(seconds: float) -> Shutdown:
+        """Ask the worker to stop and wait up to ``seconds``."""
+
+    @staticmethod
+    def infinity() -> Shutdown:
+        """Ask the worker to stop and wait however long it takes."""
+
+class ShutdownOrder:
+    """Order in which children stopped together are stopped."""
+
+    @staticmethod
+    def reverse() -> ShutdownOrder:
+        """One at a time, last started first (default)."""
+
+    @staticmethod
+    def concurrent() -> ShutdownOrder: ...
+
+class AutoShutdown:
+    """When a supervisor stops itself because its significant children ended."""
+
+    @staticmethod
+    def never() -> AutoShutdown: ...
+    @staticmethod
+    def any_significant() -> AutoShutdown: ...
+    @staticmethod
+    def all_significant() -> AutoShutdown: ...
+
+class SupervisorEvent:
+    """Something that happened in a supervisor.
+
+    ``kind`` is ``"child_started"``, ``"child_restarted"``,
+    ``"child_terminated"``, ``"child_stalled"``,
+    ``"restart_intensity_exceeded"`` or ``"stopped"``.
+    """
+
+    kind: str
+    child_id: Optional[str]
+    reason: Optional[ChildExitReason]
+
+class EventStream:
+    """A supervisor's events. Iteration ends after the ``stopped`` event."""
+
+    def recv(self, timeout: Optional[float] = None) -> Optional[SupervisorEvent]:
+        """Next event, or ``None`` after ``timeout`` seconds."""
+
+    def __iter__(self) -> Iterator[SupervisorEvent]: ...
+    def __next__(self) -> SupervisorEvent: ...
+
+class Link:
+    """Keeps two children linked until dropped or unlinked."""
+
+    def unlink(self) -> None: ...
+    def is_active(self) -> bool: ...
+
+def link(
+    a: SupervisorHandle | StatefulSupervisorHandle,
+    a_child: str,
+    b: SupervisorHandle | StatefulSupervisorHandle,
+    b_child: str,
+) -> Link:
+    """Link two children: when either ends other than normally, the other is
+    killed and restarted by its supervisor."""
 
 class MailboxConfig:
     """Capacity configuration for a mailbox."""
@@ -151,11 +224,19 @@ class SupervisorSpec:
     def with_shutdown_timeout(self, seconds: float) -> None:
         """How long a worker may take to stop before it is abandoned."""
 
+    def with_shutdown_order(self, order: ShutdownOrder) -> None: ...
+    def with_auto_shutdown(self, auto_shutdown: AutoShutdown) -> None: ...
+    def with_restart_policy(self, policy: RestartPolicy) -> None:
+        """How this supervisor is restarted when nested in another."""
+
     def add_worker(
         self,
         id: str,
         restart_policy: RestartPolicy,
         worker_fn: Callable[..., Any],
+        *,
+        shutdown: Optional[Shutdown] = None,
+        significant: bool = False,
     ) -> None:
         """Register a worker. Raises ``TypeError`` if ``worker_fn`` is not
         callable, or ``ValueError`` if ``id`` is already registered."""
@@ -166,7 +247,8 @@ class SupervisorHandle:
     """Controls a running supervision tree."""
 
     @staticmethod
-    def start(spec: SupervisorSpec) -> SupervisorHandle: ...
+    def start(spec: SupervisorSpec) -> SupervisorHandle:
+        """Start the tree. Raises ``ValueError`` for an invalid spec."""
     def name(self) -> str: ...
     def uptime(self) -> int:
         """Seconds since the supervisor started."""
@@ -189,12 +271,26 @@ class SupervisorHandle:
     ) -> str:
         """Start a child and wait for it to initialize."""
 
+    def start_unique_child(
+        self,
+        prefix: str,
+        restart_policy: RestartPolicy,
+        worker_fn: Callable[..., Any],
+        *,
+        shutdown: Optional[Shutdown] = None,
+    ) -> str:
+        """Start a child under a generated id ``{prefix}-{n}``; returns it."""
+
+    def kill_child(self, child_id: str) -> bool:
+        """Kill a child as if it crashed, so its restart policy applies."""
+
+    def subscribe(self) -> EventStream: ...
     def terminate_child(self, child_id: str) -> None: ...
     def shutdown(self) -> None:
         """Stop the tree and block until every worker has stopped.
 
-        Workers are stopped together and share the spec's shutdown timeout;
-        one that ignores ``should_stop`` is abandoned once it has elapsed.
+        Workers are stopped last-started first, each within its shutdown
+        timeout; one that ignores ``should_stop`` is abandoned once it elapses.
         """
         ...
 
@@ -205,6 +301,9 @@ class StatefulSupervisorSpec:
     def with_restart_strategy(self, strategy: RestartStrategy) -> None: ...
     def with_restart_intensity(self, intensity: RestartIntensity) -> None: ...
     def with_shutdown_timeout(self, seconds: float) -> None: ...
+    def with_shutdown_order(self, order: ShutdownOrder) -> None: ...
+    def with_auto_shutdown(self, auto_shutdown: AutoShutdown) -> None: ...
+    def with_restart_policy(self, policy: RestartPolicy) -> None: ...
     def context(self) -> WorkerContext:
         """The shared context handed to every worker."""
 
@@ -213,6 +312,9 @@ class StatefulSupervisorSpec:
         id: str,
         restart_policy: RestartPolicy,
         worker_fn: Callable[..., Any],
+        *,
+        shutdown: Optional[Shutdown] = None,
+        significant: bool = False,
     ) -> None:
         """Register a worker; it is called with the shared ``WorkerContext``."""
 
@@ -226,12 +328,14 @@ class StatefulSupervisorHandle:
     def name(self) -> str: ...
     def which_children(self) -> List[ChildInfo]: ...
     def count_children(self) -> Dict[str, int]: ...
+    def kill_child(self, child_id: str) -> bool: ...
+    def subscribe(self) -> EventStream: ...
     def terminate_child(self, child_id: str) -> None: ...
     def shutdown(self) -> None:
         """Stop the tree and block until every worker has stopped.
 
-        Workers are stopped together and share the spec's shutdown timeout;
-        one that ignores ``should_stop`` is abandoned once it has elapsed.
+        Workers are stopped last-started first, each within its shutdown
+        timeout; one that ignores ``should_stop`` is abandoned once it elapses.
         """
         ...
 
@@ -246,14 +350,15 @@ class SupervisorAddress:
 class RemoteSupervisorHandle:
     """Controls a supervisor in another process or host.
 
-    The wire protocol is unauthenticated and unencrypted; only connect over a
-    network you control.
+    With ``cookie`` set, both ends authenticate with the shared secret. Traffic
+    is not encrypted; only connect over a network you control.
     """
 
     @staticmethod
-    def connect_tcp(addr: str) -> RemoteSupervisorHandle: ...
+    def connect_tcp(addr: str, *, cookie: Optional[str] = None) -> RemoteSupervisorHandle: ...
     @staticmethod
-    def connect_unix(path: str) -> RemoteSupervisorHandle: ...
+    def connect_unix(path: str, *, cookie: Optional[str] = None) -> RemoteSupervisorHandle: ...
+    def status(self) -> Dict[str, Any]: ...
     def which_children(self) -> List[ChildInfo]: ...
     def terminate_child(self, child_id: str) -> None: ...
     def shutdown(self) -> None: ...

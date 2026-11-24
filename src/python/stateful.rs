@@ -14,10 +14,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
-use crate::supervisor::{SupervisorHandle, SupervisorSpec};
+use crate::supervisor::{ChildSpec, SupervisorHandle, SupervisorSpec};
 use crate::types::{ChildType, ShutdownSignal, WorkerContext};
 
 use super::context::PyWorkerContext;
+use super::events::PyEventStream;
+use super::options::{PyAutoShutdown, PyShutdown, PyShutdownOrder};
 use super::supervisor::ensure_unique_id;
 use super::types::{PyChildInfo, PyRestartIntensity, PyRestartPolicy, PyRestartStrategy};
 use super::worker::{PyWorker, PyWorkerFn};
@@ -68,7 +70,7 @@ impl PyStatefulSupervisorSpec {
     /// `def worker(ctx):` is the expected shape. A zero-argument callable also
     /// works, and `def worker(ctx, should_stop):` additionally receives a handle
     /// for cooperative shutdown.
-    #[pyo3(signature = (id, restart_policy, worker_fn))]
+    #[pyo3(signature = (id, restart_policy, worker_fn, *, shutdown=None, significant=false))]
     #[allow(clippy::needless_pass_by_value)]
     fn add_worker(
         &mut self,
@@ -76,33 +78,52 @@ impl PyStatefulSupervisorSpec {
         id: String,
         restart_policy: PyRestartPolicy,
         worker_fn: Py<PyAny>,
+        shutdown: Option<PyShutdown>,
+        significant: bool,
     ) -> PyResult<()> {
         ensure_callable(py, &worker_fn, &id)?;
         ensure_unique_id(&self.inner, &id)?;
 
-        let policy = restart_policy.inner;
         let id_clone = id.clone();
         let worker_fn_arc = Arc::new(PyWorkerFn::new(py, worker_fn.clone_ref(py)));
-
         let context = self.context.clone();
 
-        self.inner = std::mem::replace(&mut self.inner, SupervisorSpec::new("temp")).with_worker(
-            id,
-            move |signal: ShutdownSignal| {
-                // Hand the worker the shared context, which is the entire
-                // point of a stateful supervisor.
-                PyWorker::with_context(
-                    id_clone.clone(),
-                    Arc::clone(&worker_fn_arc),
-                    PyWorkerContext {
-                        inner: context.clone(),
-                    },
-                    signal,
-                )
-            },
-            policy,
-        );
+        let mut child = ChildSpec::new(id, move |signal: ShutdownSignal| {
+            // Hand the worker the shared context, which is the entire point of
+            // a stateful supervisor.
+            PyWorker::with_context(
+                id_clone.clone(),
+                Arc::clone(&worker_fn_arc),
+                PyWorkerContext {
+                    inner: context.clone(),
+                },
+                signal,
+            )
+        })
+        .restart(restart_policy.inner)
+        .significant(significant);
+        if let Some(mode) = shutdown {
+            child = child.shutdown(mode.inner);
+        }
+
+        self.inner =
+            std::mem::replace(&mut self.inner, SupervisorSpec::new("temp")).with_child(child);
         Ok(())
+    }
+
+    /// The order in which children stopped together are stopped.
+    fn with_shutdown_order(&mut self, order: PyShutdownOrder) {
+        self.inner.shutdown_order = order.inner;
+    }
+
+    /// Makes the supervisor stop itself when its significant children end.
+    fn with_auto_shutdown(&mut self, auto_shutdown: PyAutoShutdown) {
+        self.inner.auto_shutdown = auto_shutdown.inner;
+    }
+
+    /// How this supervisor is restarted when nested in another.
+    fn with_restart_policy(&mut self, policy: PyRestartPolicy) {
+        self.inner.restart_policy = policy.inner;
     }
 
     fn add_supervisor(&mut self, supervisor: &PyStatefulSupervisorSpec) {
@@ -114,7 +135,7 @@ impl PyStatefulSupervisorSpec {
 /// Python-facing stateful supervisor handle
 #[pyclass(name = "StatefulSupervisorHandle")]
 pub struct PyStatefulSupervisorHandle {
-    inner: SupervisorHandle,
+    pub(crate) inner: SupervisorHandle,
 }
 
 #[pymethods]
@@ -167,6 +188,19 @@ impl PyStatefulSupervisorHandle {
                 "Failed to count children: {e}"
             ))),
         }
+    }
+
+    /// Kills a child as if it crashed, so its restart policy applies. Returns
+    /// False if it had already exited.
+    fn kill_child(&self, py: Python<'_>, child_id: String) -> PyResult<bool> {
+        let handle = self.inner.clone();
+        block_on_without_gil(py, async move { handle.kill_child(&child_id).await })
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to kill child: {e}")))
+    }
+
+    /// A stream of this supervisor's events.
+    fn subscribe(&self) -> PyEventStream {
+        PyEventStream::new(self.inner.subscribe())
     }
 
     fn terminate_child(&self, child_id: String, py: Python<'_>) -> PyResult<()> {

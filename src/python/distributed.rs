@@ -10,6 +10,7 @@ use pyo3::prelude::*;
 use std::sync::Arc;
 
 use crate::distributed::{RemoteSupervisorHandle, SupervisorAddress};
+use pyo3::types::PyDict;
 
 use super::block_on_without_gil;
 use super::types::PyChildInfo;
@@ -55,23 +56,48 @@ pub struct PyRemoteSupervisorHandle {
     inner: Arc<RemoteSupervisorHandle>,
 }
 
-#[pymethods]
 impl PyRemoteSupervisorHandle {
-    #[staticmethod]
-    fn connect_tcp(addr: String) -> Self {
-        // No I/O happens here: each command opens its own connection.
-        PyRemoteSupervisorHandle {
-            inner: Arc::new(RemoteSupervisorHandle::tcp(addr)),
+    fn with_cookie(handle: RemoteSupervisorHandle, cookie: Option<String>) -> Self {
+        let configured = match cookie {
+            Some(secret) => handle.with_cookie(secret),
+            None => handle,
+        };
+        Self {
+            inner: Arc::new(configured),
         }
     }
+}
 
+#[pymethods]
+impl PyRemoteSupervisorHandle {
+    /// A handle to a supervisor on TCP `addr`. No connection is made until
+    /// the first command; `cookie` authenticates both ends when set.
+    #[staticmethod]
+    #[pyo3(signature = (addr, *, cookie=None))]
+    fn connect_tcp(addr: String, cookie: Option<String>) -> Self {
+        Self::with_cookie(RemoteSupervisorHandle::tcp(addr), cookie)
+    }
+
+    /// A handle to a supervisor on the Unix socket at `path`.
     #[staticmethod]
     #[cfg(unix)]
-    fn connect_unix(path: String) -> Self {
-        // No I/O happens here: each command opens its own connection.
-        PyRemoteSupervisorHandle {
-            inner: Arc::new(RemoteSupervisorHandle::unix(path)),
-        }
+    #[pyo3(signature = (path, *, cookie=None))]
+    fn connect_unix(path: String, cookie: Option<String>) -> Self {
+        Self::with_cookie(RemoteSupervisorHandle::unix(path), cookie)
+    }
+
+    /// The remote supervisor's name, child count, restart strategy and
+    /// uptime in seconds.
+    fn status(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let handle = Arc::clone(&self.inner);
+        let status = block_on_without_gil(py, async move { handle.status().await })
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to get status: {e}")))?;
+        let dict = PyDict::new(py);
+        dict.set_item("name", status.name)?;
+        dict.set_item("children_count", status.children_count)?;
+        dict.set_item("restart_strategy", format!("{:?}", status.restart_strategy))?;
+        dict.set_item("uptime_secs", status.uptime_secs)?;
+        Ok(dict.into())
     }
 
     fn shutdown(&self, py: Python<'_>) -> PyResult<()> {

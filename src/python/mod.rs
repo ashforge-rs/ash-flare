@@ -16,7 +16,9 @@ use std::sync::OnceLock;
 
 mod context;
 mod distributed;
+mod events;
 mod mailbox;
+mod options;
 mod stateful;
 mod supervisor;
 mod types;
@@ -106,6 +108,17 @@ fn ash_flare(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // re-exports with `from .ash_flare import *`, which skips dunder names.
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("version", env!("CARGO_PKG_VERSION"))?;
+
+    // Child and supervisor options
+    m.add_class::<options::PyShutdown>()?;
+    m.add_class::<options::PyShutdownOrder>()?;
+    m.add_class::<options::PyAutoShutdown>()?;
+
+    // Events and links
+    m.add_class::<events::PySupervisorEvent>()?;
+    m.add_class::<events::PyEventStream>()?;
+    m.add_class::<events::PyLink>()?;
+    m.add_function(wrap_pyfunction!(events::link, m)?)?;
 
     // Mailbox system
     m.add_class::<PyMailboxConfig>()?;
