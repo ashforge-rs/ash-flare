@@ -51,7 +51,14 @@ impl SupervisorHandle {
 
         let runtime_name = Arc::clone(&name_arc);
         tokio::spawn(async move {
-            let reason = runtime.run().await;
+            // A panic in the runtime itself must still reach the parent, as an
+            // abnormal exit, or the parent would keep a dead child forever.
+            let reason = crate::panic::CatchUnwind(Box::pin(runtime.run()))
+                .await
+                .unwrap_or_else(|message| {
+                    tracing::error!(error = %message, "supervisor runtime panicked");
+                    crate::types::ChildExitReason::Abnormal
+                });
             tracing::debug!(name = %runtime_name, reason = ?reason, "supervisor stopped");
 
             // A `Shutdown` reason is the parent's own doing and is ignored there;

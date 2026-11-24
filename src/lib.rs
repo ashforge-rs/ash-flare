@@ -88,6 +88,7 @@ mod readme_doctests {}
 #[macro_use]
 mod macros;
 
+mod panic;
 mod restart;
 mod supervisor;
 mod supervisor_common;

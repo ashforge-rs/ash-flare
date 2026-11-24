@@ -178,6 +178,25 @@ impl fmt::Debug for WorkerSpec {
     }
 }
 
+/// Stands in for a worker whose factory panicked: it fails to initialize with
+/// the panic message, which the supervisor handles like any failed start.
+struct FactoryPanicked(String);
+
+impl DynWorker for FactoryPanicked {
+    fn initialize(&mut self) -> BoxFuture<'_, Result<(), String>> {
+        let message = format!("worker factory {}", self.0);
+        Box::pin(async move { Err(message) })
+    }
+
+    fn run(&mut self) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn shutdown(&mut self) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 // ============================================================================
 // Running worker
 // ============================================================================
@@ -216,7 +235,11 @@ impl WorkerProcess {
         init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let worker = spec.create_worker(ShutdownSignal::new(shutdown_rx.clone()));
+        // The factory is user code running on the supervisor's own task; a
+        // panic there must fail this child's start, not the supervisor.
+        let signal_for_factory = ShutdownSignal::new(shutdown_rx.clone());
+        let worker = crate::panic::catch(|| spec.create_worker(signal_for_factory))
+            .unwrap_or_else(|message| Box::new(FactoryPanicked(message)));
         let worker_id = Arc::clone(&spec.id);
         let signal = ShutdownSignal::new(shutdown_rx);
 

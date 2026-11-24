@@ -1,5 +1,6 @@
 //! Internal supervision logic: restart decisions and the worker lifecycle
 
+use crate::panic::CatchUnwind;
 use crate::restart::{BackoffTracker, RestartPolicy, RestartStrategy, RestartTracker};
 use crate::supervisor::SupervisorCommand;
 use crate::types::{ChildExitReason, ShutdownSignal};
@@ -377,8 +378,12 @@ pub(crate) async fn run_worker(
     // does not allocate a "supervisor/worker" string up front.
     let qualified_name = QualifiedName(&supervisor_name, &worker_id);
 
-    // Initialize the worker
-    match worker.initialize().await {
+    // Every call into user code is guarded: a panic is reported as a failure
+    // like any other, so the supervisor sees the exit and applies its policy.
+    match CatchUnwind(worker.initialize())
+        .await
+        .and_then(std::convert::identity)
+    {
         Ok(()) => {
             // Send initialization success confirmation if linked
             if let Some(tx) = init_tx {
@@ -415,7 +420,7 @@ pub(crate) async fn run_worker(
             tracing::debug!(worker = %qualified_name, "worker shutdown requested");
             ChildExitReason::Shutdown
         }
-        result = worker.run() => match result {
+        result = CatchUnwind(worker.run()) => match result.and_then(std::convert::identity) {
             Ok(()) => {
                 tracing::debug!(worker = %qualified_name, "worker completed normally");
                 ChildExitReason::Normal
@@ -432,7 +437,10 @@ pub(crate) async fn run_worker(
     };
 
     // Shutdown the worker
-    if let Err(err) = worker.shutdown().await {
+    if let Err(err) = CatchUnwind(worker.shutdown())
+        .await
+        .and_then(std::convert::identity)
+    {
         tracing::error!(
             worker = %qualified_name,
             error = %err,
