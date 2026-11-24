@@ -52,6 +52,24 @@ pub enum ShutdownOrder {
     Concurrent,
 }
 
+/// When a supervisor stops itself because its significant children ended, as
+/// in OTP's `auto_shutdown` flag.
+///
+/// Only a significant child that terminates on its own and is not restarted
+/// counts: a `Temporary` child that exits for any reason, or a `Transient`
+/// child that exits normally. Children stopped with `terminate_child` or by
+/// the supervisor do not.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum AutoShutdown {
+    /// Never; no child may be significant.
+    #[default]
+    Never,
+    /// As soon as any significant child has ended.
+    AnySignificant,
+    /// Once every significant child has ended.
+    AllSignificant,
+}
+
 /// Full specification of a worker child, for when the defaults of
 /// [`SupervisorSpec::with_worker`] are not enough.
 ///
@@ -102,6 +120,15 @@ impl ChildSpec {
         self
     }
 
+    /// Marks the child as significant for the supervisor's
+    /// [`AutoShutdown`]. A significant child must be `Transient` or
+    /// `Temporary`.
+    #[must_use]
+    pub fn significant(mut self, significant: bool) -> Self {
+        self.worker.significant = significant;
+        self
+    }
+
     /// The child's id.
     #[must_use]
     pub fn id(&self) -> &str {
@@ -142,6 +169,9 @@ pub struct SupervisorSpec {
     pub(crate) restart_backoff: RestartBackoff,
     pub(crate) shutdown_timeout: Duration,
     pub(crate) shutdown_order: ShutdownOrder,
+    pub(crate) auto_shutdown: AutoShutdown,
+    /// How this supervisor is restarted when it is the child of another.
+    pub(crate) restart_policy: RestartPolicy,
 }
 
 /// Default grace period a worker gets to stop cooperatively before being aborted.
@@ -158,6 +188,8 @@ impl SupervisorSpec {
             restart_backoff: RestartBackoff::default(),
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             shutdown_order: ShutdownOrder::default(),
+            auto_shutdown: AutoShutdown::default(),
+            restart_policy: RestartPolicy::Permanent,
         }
     }
 
@@ -179,9 +211,34 @@ impl SupervisorSpec {
                     child_id: child.id().to_owned(),
                 });
             }
-            if let ChildDef::Supervisor(nested) = child {
-                nested.validate()?;
+            match child {
+                ChildDef::Worker(worker) if worker.significant => {
+                    self.validate_significant(worker)?;
+                }
+                ChildDef::Worker(_) => {}
+                ChildDef::Supervisor(nested) => nested.validate()?,
             }
+        }
+        Ok(())
+    }
+
+    /// A significant child must be able to end without being restarted, and
+    /// only makes sense when the supervisor shuts down automatically.
+    fn validate_significant(&self, worker: &WorkerSpec) -> Result<(), SupervisorError> {
+        let invalid = |reason: &str| SupervisorError::InvalidChildSpec {
+            supervisor: self.name.clone(),
+            child_id: worker.id.to_string(),
+            reason: reason.to_owned(),
+        };
+        if worker.restart_policy == RestartPolicy::Permanent {
+            return Err(invalid(
+                "a significant child must be Transient or Temporary; a Permanent one never ends",
+            ));
+        }
+        if self.auto_shutdown == AutoShutdown::Never {
+            return Err(invalid(
+                "a significant child needs an auto_shutdown other than Never",
+            ));
         }
         Ok(())
     }
@@ -242,6 +299,26 @@ impl SupervisorSpec {
     #[must_use]
     pub fn with_shutdown_order(mut self, order: ShutdownOrder) -> Self {
         self.shutdown_order = order;
+        self
+    }
+
+    /// Makes the supervisor stop itself when its significant children end.
+    /// Defaults to [`AutoShutdown::Never`].
+    #[must_use]
+    pub fn with_auto_shutdown(mut self, auto_shutdown: AutoShutdown) -> Self {
+        self.auto_shutdown = auto_shutdown;
+        self
+    }
+
+    /// Sets how this supervisor is restarted when it is nested in another.
+    /// Defaults to [`RestartPolicy::Permanent`].
+    ///
+    /// A supervisor that stopped on its own, through its [`AutoShutdown`],
+    /// counts as a normal exit; make it `Transient` so the parent does not
+    /// start it again.
+    #[must_use]
+    pub fn with_restart_policy(mut self, policy: RestartPolicy) -> Self {
+        self.restart_policy = policy;
         self
     }
 

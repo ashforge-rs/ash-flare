@@ -8,6 +8,6 @@ mod spec;
 
 pub use error::SupervisorError;
 pub use handle::SupervisorHandle;
-pub use spec::{ChildSpec, Shutdown, ShutdownOrder, SupervisorSpec};
+pub use spec::{AutoShutdown, ChildSpec, Shutdown, ShutdownOrder, SupervisorSpec};
 
 pub(crate) use runtime::SupervisorCommand;

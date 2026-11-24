@@ -3,11 +3,11 @@
 use super::child::{Child, Children, StopOutcome, stop_all};
 use super::error::SupervisorError;
 use super::handle::SupervisorHandle;
-use super::spec::{ChildDef, ShutdownOrder, SupervisorSpec};
+use super::spec::{AutoShutdown, ChildDef, ShutdownOrder, SupervisorSpec};
 use crate::events::{EventSender, SupervisorEvent, emit};
 use crate::restart::{BackoffTracker, RestartPolicy, RestartStrategy, RestartTracker};
 use crate::supervisor_common::{RestartDecision, decide_restart};
-use crate::types::{ChildExitReason, ChildId, ChildInfo};
+use crate::types::{ChildExitReason, ChildId, ChildInfo, ChildType};
 use crate::worker::{WorkerProcess, WorkerSpec};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -76,8 +76,9 @@ pub(crate) struct StatusSnapshot {
 enum RuntimeControl {
     /// Keep processing commands.
     Continue,
-    /// Terminate the supervisor task.
-    Stop,
+    /// Terminate the supervisor, reporting this reason to its parent. Its
+    /// children have already been shut down.
+    Exit(ChildExitReason),
 }
 
 /// Internal state machine that manages supervisor lifecycle and child processes
@@ -93,6 +94,7 @@ pub(crate) struct SupervisorRuntime {
     backoff_tracker: BackoffTracker,
     shutdown_timeout: Duration,
     shutdown_order: ShutdownOrder,
+    auto_shutdown: AutoShutdown,
     created_at: std::time::Instant,
     events: EventSender,
     /// Instances this supervisor stopped and already reported as terminated;
@@ -149,6 +151,7 @@ impl SupervisorRuntime {
             backoff_tracker: BackoffTracker::new(spec.restart_backoff),
             shutdown_timeout: spec.shutdown_timeout,
             shutdown_order: spec.shutdown_order,
+            auto_shutdown: spec.auto_shutdown,
             created_at: std::time::Instant::now(),
             events,
             silenced: HashSet::new(),
@@ -199,14 +202,14 @@ impl SupervisorRuntime {
                     instance,
                     reason,
                 } => {
-                    if self.handle_child_terminated(id, instance, reason).await
-                        == RuntimeControl::Stop
+                    if let RuntimeControl::Exit(exit) =
+                        self.handle_child_terminated(id, instance, reason).await
                     {
-                        // Restart intensity exceeded: children are already shut
-                        // down. Terminate the supervisor itself, reporting an
-                        // abnormal exit so a parent supervisor observes the
-                        // failure and applies its own policy, as OTP does.
-                        return ChildExitReason::Abnormal;
+                        // Children are already shut down: either restart
+                        // intensity was exceeded (abnormal, so the parent applies
+                        // its own policy, as OTP does) or significant children
+                        // ended (shutdown).
+                        return exit;
                     }
                 }
                 SupervisorCommand::RestartChild { id, strategy } => {
@@ -395,11 +398,23 @@ impl SupervisorRuntime {
             },
         );
 
+        // A nested supervisor reporting `Shutdown` about its current instance
+        // was not stopped by this supervisor (that would make the report
+        // stale): it shut itself down through its auto_shutdown, which counts
+        // as ending normally.
+        let effective = if self.children[position].child_type() == ChildType::Supervisor
+            && reason == ChildExitReason::Shutdown
+        {
+            ChildExitReason::Normal
+        } else {
+            reason
+        };
+
         // Supervision semantics live in one shared place; this runtime only
         // carries out the decision.
         let decision = decide_restart(
-            self.children[position].restart_policy(),
-            reason,
+            Some(self.children[position].policy()),
+            effective,
             self.restart_strategy,
             &mut self.restart_tracker,
             &mut self.backoff_tracker,
@@ -417,11 +432,20 @@ impl SupervisorRuntime {
                 tracing::debug!(
                     supervisor = %self.name,
                     child = %id,
-                    policy = ?self.children[position].restart_policy(),
+                    policy = ?self.children[position].policy(),
                     reason = ?reason,
                     "not restarting child"
                 );
-                self.children.remove(position);
+                let ended = self.children.remove(position);
+                if self.auto_shutdown_due(&ended) {
+                    tracing::debug!(
+                        supervisor = %self.name,
+                        child = %id,
+                        "significant child ended, shutting down"
+                    );
+                    self.shutdown_children().await;
+                    return RuntimeControl::Exit(ChildExitReason::Shutdown);
+                }
                 RuntimeControl::Continue
             }
             RestartDecision::Escalate => {
@@ -431,7 +455,7 @@ impl SupervisorRuntime {
                 );
                 emit(&self.events, SupervisorEvent::RestartIntensityExceeded);
                 self.shutdown_children().await;
-                RuntimeControl::Stop
+                RuntimeControl::Exit(ChildExitReason::Abnormal)
             }
             RestartDecision::Restart { delay, strategy } => {
                 if delay.is_zero() {
@@ -442,6 +466,19 @@ impl SupervisorRuntime {
 
                 RuntimeControl::Continue
             }
+        }
+    }
+
+    /// Whether `ended`, a child that just terminated on its own and is not
+    /// being restarted, makes this supervisor shut itself down.
+    fn auto_shutdown_due(&self, ended: &Child) -> bool {
+        if !ended.is_significant() {
+            return false;
+        }
+        match self.auto_shutdown {
+            AutoShutdown::Never => false,
+            AutoShutdown::AnySignificant => true,
+            AutoShutdown::AllSignificant => !self.children.iter().any(Child::is_significant),
         }
     }
 
@@ -519,7 +556,7 @@ impl SupervisorRuntime {
     /// A `Temporary` child is never restarted, not even when it was a sibling's
     /// failure that stopped it, so it leaves supervision here.
     fn leaves_supervision(child: &Child) -> bool {
-        child.restart_policy() == Some(RestartPolicy::Temporary)
+        child.policy() == RestartPolicy::Temporary
     }
 
     /// Replaces a child that has been shut down with a freshly started one of

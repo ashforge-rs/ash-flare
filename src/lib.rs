@@ -110,7 +110,8 @@ pub use events::SupervisorEvent;
 pub use registry::{Registration, Registry, RegistryError};
 pub use restart::{RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy};
 pub use supervisor::{
-    ChildSpec, Shutdown, ShutdownOrder, SupervisorError, SupervisorHandle, SupervisorSpec,
+    AutoShutdown, ChildSpec, Shutdown, ShutdownOrder, SupervisorError, SupervisorHandle,
+    SupervisorSpec,
 };
 pub use types::{ChildExitReason, ChildId, ChildInfo, ChildType, ShutdownSignal, WorkerContext};
 pub use worker::{Worker, WorkerFactory};

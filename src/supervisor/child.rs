@@ -63,6 +63,25 @@ impl Child {
         }
     }
 
+    /// The policy restart decisions use. Nested supervisors carry their own,
+    /// set with `SupervisorSpec::with_restart_policy`.
+    #[inline]
+    pub fn policy(&self) -> RestartPolicy {
+        match self {
+            Child::Worker(w) => w.spec.restart_policy,
+            Child::Supervisor { spec, .. } => spec.restart_policy,
+        }
+    }
+
+    /// Whether the child counts towards its supervisor's auto shutdown.
+    #[inline]
+    pub fn is_significant(&self) -> bool {
+        match self {
+            Child::Worker(w) => w.spec.significant,
+            Child::Supervisor { .. } => false,
+        }
+    }
+
     /// How this child is stopped: its own [`Shutdown`] setting, or the
     /// supervisor's timeout. Nested supervisors are always waited on, since
     /// they apply their own children's settings.

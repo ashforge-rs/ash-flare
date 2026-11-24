@@ -151,6 +151,8 @@ pub(crate) struct WorkerSpec {
     pub restart_policy: RestartPolicy,
     /// How the worker is stopped; `None` uses the supervisor's timeout.
     pub shutdown: Option<crate::supervisor::Shutdown>,
+    /// Whether this child ending on its own can shut its supervisor down.
+    pub significant: bool,
 }
 
 impl WorkerSpec {
@@ -164,6 +166,7 @@ impl WorkerSpec {
             factory: Arc::new(move |signal| Box::new(factory.create(signal))),
             restart_policy,
             shutdown: None,
+            significant: false,
         }
     }
 
@@ -178,6 +181,7 @@ impl fmt::Debug for WorkerSpec {
             .field("id", &self.id)
             .field("restart_policy", &self.restart_policy)
             .field("shutdown", &self.shutdown)
+            .field("significant", &self.significant)
             .finish_non_exhaustive()
     }
 }

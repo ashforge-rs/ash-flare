@@ -23,6 +23,16 @@ pub enum SupervisorError {
         /// The id used more than once
         child_id: String,
     },
+    /// A child's settings contradict each other or the supervisor's.
+    #[error("invalid child '{child_id}' in supervisor '{supervisor}': {reason}")]
+    InvalidChildSpec {
+        /// Name of the supervisor the child belongs to
+        supervisor: String,
+        /// The child's id
+        child_id: String,
+        /// What is wrong
+        reason: String,
+    },
     /// Child initialization failed.
     #[error("child '{child_id}' initialization failed: {reason}")]
     InitializationFailed {
