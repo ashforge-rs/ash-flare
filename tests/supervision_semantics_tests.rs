@@ -205,6 +205,56 @@ async fn one_for_all_drops_a_temporary_sibling() {
     handle.shutdown().await.expect("shutdown");
 }
 
+/// Dropping a `Temporary` child during a restart round moves every child after
+/// it; looking those children up by id must still find them afterwards.
+#[tokio::test]
+async fn children_after_a_dropped_temporary_are_still_found_by_id() {
+    let temporary = counter();
+    let crasher = counter();
+    let later = counter();
+
+    let spec = SupervisorSpec::new("shifted-ids")
+        .with_restart_strategy(RestartStrategy::OneForAll)
+        .with_restart_backoff(RestartBackoff::none())
+        .with_worker(
+            "temporary",
+            idle_child(&temporary),
+            RestartPolicy::Temporary,
+        )
+        .with_worker(
+            "crasher",
+            crashing_child(&crasher),
+            RestartPolicy::Permanent,
+        )
+        .with_worker("later", idle_child(&later), RestartPolicy::Permanent);
+
+    let handle = SupervisorHandle::start(spec);
+    sleep(Duration::from_millis(300)).await;
+
+    let ids: Vec<String> = handle
+        .which_children()
+        .await
+        .expect("supervisor alive")
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(ids, vec!["crasher".to_owned(), "later".to_owned()]);
+
+    // Both survivors moved down one position when "temporary" left.
+    handle.terminate_child("later").await.expect("found by id");
+    handle
+        .terminate_child("crasher")
+        .await
+        .expect("found by id");
+    assert!(
+        handle.terminate_child("temporary").await.is_err(),
+        "the dropped child is gone"
+    );
+    assert!(handle.which_children().await.expect("alive").is_empty());
+
+    handle.shutdown().await.expect("shutdown");
+}
+
 /// `RestForOne` restarts the failed child and everything started after it - once.
 #[tokio::test]
 async fn rest_for_one_restarts_the_tail_exactly_once() {

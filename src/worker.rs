@@ -3,7 +3,7 @@
 use crate::restart::RestartPolicy;
 use crate::supervisor::SupervisorCommand;
 use crate::supervisor_common::run_worker;
-use crate::types::{ChildId, ShutdownSignal};
+use crate::types::ShutdownSignal;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -145,7 +145,8 @@ type ErasedFactory = Arc<dyn Fn(ShutdownSignal) -> Box<dyn DynWorker> + Send + S
 /// Specification for creating and restarting a worker
 #[derive(Clone)]
 pub(crate) struct WorkerSpec {
-    pub id: ChildId,
+    /// Shared, so spawning a worker and indexing it by id never copy it.
+    pub id: Arc<str>,
     factory: ErasedFactory,
     pub restart_policy: RestartPolicy,
 }
@@ -157,7 +158,7 @@ impl WorkerSpec {
         restart_policy: RestartPolicy,
     ) -> Self {
         Self {
-            id: id.into(),
+            id: Arc::from(id.into()),
             factory: Arc::new(move |signal| Box::new(factory.create(signal))),
             restart_policy,
         }
@@ -216,7 +217,7 @@ impl WorkerProcess {
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let worker = spec.create_worker(ShutdownSignal::new(shutdown_rx.clone()));
-        let worker_id = spec.id.clone();
+        let worker_id = Arc::clone(&spec.id);
         let signal = ShutdownSignal::new(shutdown_rx);
 
         let handle = tokio::spawn(run_worker(

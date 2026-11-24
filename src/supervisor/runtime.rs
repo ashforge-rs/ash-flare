@@ -1,6 +1,6 @@
 //! Supervisor runtime - internal state machine
 
-use super::child::{Child, stop_all};
+use super::child::{Child, Children, stop_all};
 use super::error::SupervisorError;
 use super::handle::SupervisorHandle;
 use super::spec::{ChildSpec, SupervisorSpec};
@@ -41,14 +41,14 @@ pub(crate) enum SupervisorCommand {
         respond_to: oneshot::Sender<StatusSnapshot>,
     },
     ChildTerminated {
-        id: ChildId,
+        id: Arc<str>,
         reason: ChildExitReason,
     },
     /// Fires once a restart backoff has elapsed. Restarts are deferred through
     /// the command queue so the supervisor keeps serving commands while a child
     /// is backing off.
     RestartChild {
-        id: ChildId,
+        id: Arc<str>,
         strategy: RestartStrategy,
     },
     /// Stops every child, then the supervisor itself. `respond_to` is told
@@ -80,7 +80,7 @@ pub(crate) struct SupervisorRuntime {
     /// Shared with the handle and every worker task, so spawning and
     /// restarting a worker never copies it.
     name: Arc<str>,
-    children: Vec<Child>,
+    children: Children,
     control_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
     control_tx: mpsc::UnboundedSender<SupervisorCommand>,
     restart_strategy: RestartStrategy,
@@ -97,7 +97,7 @@ impl SupervisorRuntime {
         control_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
         control_tx: mpsc::UnboundedSender<SupervisorCommand>,
     ) -> Self {
-        let mut children = Vec::with_capacity(spec.children.len());
+        let mut children = Children::with_capacity(spec.children.len());
 
         for child_spec in spec.children {
             match child_spec {
@@ -201,12 +201,11 @@ impl SupervisorRuntime {
     }
 
     fn handle_start_child(&mut self, spec: WorkerSpec) -> Result<ChildId, SupervisorError> {
-        // Check if child with same ID already exists
-        if self.children.iter().any(|c| c.id() == spec.id) {
-            return Err(SupervisorError::ChildAlreadyExists(spec.id.clone()));
+        if self.children.contains(&spec.id) {
+            return Err(SupervisorError::ChildAlreadyExists(spec.id.to_string()));
         }
 
-        let id = spec.id.clone();
+        let id = spec.id.to_string();
         let worker = WorkerProcess::spawn(spec, Arc::clone(&self.name), self.control_tx.clone());
 
         self.children.push(Child::Worker(worker));
@@ -224,12 +223,11 @@ impl SupervisorRuntime {
         spec: WorkerSpec,
         timeout: Duration,
     ) -> Result<ChildId, SupervisorError> {
-        // Check if child with same ID already exists
-        if self.children.iter().any(|c| c.id() == spec.id) {
-            return Err(SupervisorError::ChildAlreadyExists(spec.id.clone()));
+        if self.children.contains(&spec.id) {
+            return Err(SupervisorError::ChildAlreadyExists(spec.id.to_string()));
         }
 
-        let id = spec.id.clone();
+        let id = spec.id.to_string();
         let (init_tx, init_rx) = oneshot::channel();
 
         let worker = WorkerProcess::spawn_with_link(
@@ -298,8 +296,7 @@ impl SupervisorRuntime {
     async fn handle_terminate_child(&mut self, id: &str) -> Result<(), SupervisorError> {
         let position = self
             .children
-            .iter()
-            .position(|c| c.id() == id)
+            .position(id)
             .ok_or_else(|| SupervisorError::ChildNotFound(id.to_owned()))?;
 
         let mut child = self.children.remove(position);
@@ -325,10 +322,9 @@ impl SupervisorRuntime {
             .collect()
     }
 
-    #[allow(clippy::indexing_slicing)]
     async fn handle_child_terminated(
         &mut self,
-        id: ChildId,
+        id: Arc<str>,
         reason: ChildExitReason,
     ) -> RuntimeControl {
         tracing::debug!(
@@ -338,7 +334,7 @@ impl SupervisorRuntime {
             "child terminated"
         );
 
-        let Some(position) = self.children.iter().position(|c| c.id() == id) else {
+        let Some(position) = self.children.position(&id) else {
             tracing::warn!(
                 supervisor = %self.name,
                 child = %id,
@@ -400,7 +396,7 @@ impl SupervisorRuntime {
     ///
     /// Sleeping inline would stall `Shutdown`, `which_children` and every other
     /// command for the whole backoff - up to 30s with the default settings.
-    fn defer_restart(&self, id: ChildId, delay: Duration, strategy: RestartStrategy) {
+    fn defer_restart(&self, id: Arc<str>, delay: Duration, strategy: RestartStrategy) {
         tracing::debug!(
             supervisor = %self.name,
             child = %id,
@@ -417,7 +413,7 @@ impl SupervisorRuntime {
 
     /// Carries out a restart whose backoff has elapsed.
     async fn handle_restart_child(&mut self, id: &str, strategy: RestartStrategy) {
-        let Some(position) = self.children.iter().position(|c| c.id() == id) else {
+        let Some(position) = self.children.position(id) else {
             // Terminated or dropped while it was backing off.
             tracing::debug!(
                 supervisor = %self.name,
@@ -438,16 +434,16 @@ impl SupervisorRuntime {
         }
     }
 
-    #[allow(clippy::indexing_slicing)]
     async fn restart_child(&mut self, position: usize) {
         self.children[position]
             .shutdown(self.shutdown_timeout)
             .await;
 
-        let id = Self::respawn(&mut self.children[position], &self.name, &self.control_tx);
+        let child = &mut self.children[position];
+        Self::respawn(child, &self.name, &self.control_tx);
         tracing::debug!(
             supervisor = %self.name,
-            child = %id,
+            child = %child.id(),
             "child restarted"
         );
     }
@@ -458,31 +454,9 @@ impl SupervisorRuntime {
             "restarting all children (one_for_all)"
         );
 
-        stop_all(&mut self.children, self.shutdown_timeout).await;
-
-        let mut kept = Vec::with_capacity(self.children.len());
-        for mut child in self.children.drain(..) {
-            if Self::leaves_supervision(&child) {
-                tracing::debug!(
-                    supervisor = %self.name,
-                    child = %child.id(),
-                    "temporary child not restarted, dropping from supervision"
-                );
-                self.backoff_tracker.reset_child(child.id());
-                continue;
-            }
-
-            // Nested supervisors were just shut down too, so skipping them would
-            // strand a dead handle in the children list.
-            let id = Self::respawn(&mut child, &self.name, &self.control_tx);
-            tracing::debug!(
-                supervisor = %self.name,
-                child = %id,
-                "child restarted"
-            );
-            kept.push(child);
-        }
-        self.children = kept;
+        // Nested supervisors are stopped and respawned too; skipping them
+        // would strand a dead handle in the children list.
+        self.restart_range(0).await;
     }
 
     /// Whether a child stopped as part of a restart round is gone for good.
@@ -493,36 +467,31 @@ impl SupervisorRuntime {
         child.restart_policy() == Some(RestartPolicy::Temporary)
     }
 
-    /// Replaces a child that has been shut down with a freshly started one,
-    /// returning its id.
+    /// Replaces a child that has been shut down with a freshly started one of
+    /// the same id, in place, so its position and index entry stay valid.
     fn respawn(
         child: &mut Child,
         supervisor_name: &Arc<str>,
         control_tx: &mpsc::UnboundedSender<SupervisorCommand>,
-    ) -> ChildId {
+    ) {
         match child {
             Child::Worker(worker) => {
                 let spec = worker.spec.clone();
-                let id = spec.id.clone();
                 *child = Child::Worker(WorkerProcess::spawn(
                     spec,
                     Arc::clone(supervisor_name),
                     control_tx.clone(),
                 ));
-                id
             }
             Child::Supervisor { spec, .. } => {
                 let spec = Arc::clone(spec);
-                let id = spec.name.clone();
                 let handle =
                     SupervisorHandle::start_supervised((*spec).clone(), control_tx.clone());
                 *child = Child::Supervisor { handle, spec };
-                id
             }
         }
     }
 
-    #[allow(clippy::indexing_slicing)]
     async fn restart_from(&mut self, position: usize) {
         tracing::debug!(
             supervisor = %self.name,
@@ -530,36 +499,55 @@ impl SupervisorRuntime {
             "restarting from position (rest_for_one)"
         );
 
-        // Stop the affected children together, then start them again in their
-        // original order.
-        let mut affected = self.children.split_off(position);
-        stop_all(&mut affected, self.shutdown_timeout).await;
+        self.restart_range(position).await;
+    }
 
-        let mut kept = Vec::with_capacity(affected.len());
-        for mut child in affected {
-            if Self::leaves_supervision(&child) {
+    /// The children from `position` on, which a restart round affects.
+    fn affected_from(children: &mut Children, position: usize) -> &mut [Child] {
+        children
+            .as_mut_slice()
+            .get_mut(position..)
+            .unwrap_or_default()
+    }
+
+    /// Restarts every child from `position` on: stops them together, then
+    /// starts them again in their original order, in place. `Temporary`
+    /// children leave supervision instead of being restarted.
+    async fn restart_range(&mut self, position: usize) {
+        let timeout = self.shutdown_timeout;
+        stop_all(Self::affected_from(&mut self.children, position), timeout).await;
+
+        let mut dropped_any = false;
+        for child in Self::affected_from(&mut self.children, position) {
+            if Self::leaves_supervision(child) {
                 tracing::debug!(
                     supervisor = %self.name,
                     child = %child.id(),
                     "temporary child not restarted, dropping from supervision"
                 );
                 self.backoff_tracker.reset_child(child.id());
+                dropped_any = true;
                 continue;
             }
 
-            let id = Self::respawn(&mut child, &self.name, &self.control_tx);
+            Self::respawn(child, &self.name, &self.control_tx);
             tracing::debug!(
                 supervisor = %self.name,
-                child = %id,
+                child = %child.id(),
                 "child restarted"
             );
-            kept.push(child);
         }
-        self.children.append(&mut kept);
+
+        // Only removing a child moves the others, so only then is the index
+        // rebuilt. A stopped `Temporary` child has already been shut down.
+        if dropped_any {
+            self.children
+                .retain(|child| !Self::leaves_supervision(child));
+        }
     }
 
     async fn shutdown_children(&mut self) {
-        stop_all(&mut self.children, self.shutdown_timeout).await;
+        stop_all(self.children.as_mut_slice(), self.shutdown_timeout).await;
         tracing::debug!(
             supervisor = %self.name,
             children = self.children.len(),

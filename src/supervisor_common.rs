@@ -2,7 +2,7 @@
 
 use crate::restart::{BackoffTracker, RestartPolicy, RestartStrategy, RestartTracker};
 use crate::supervisor::SupervisorCommand;
-use crate::types::{ChildExitReason, ChildId, ShutdownSignal};
+use crate::types::{ChildExitReason, ShutdownSignal};
 use crate::worker::DynWorker;
 use std::fmt;
 use std::sync::Arc;
@@ -367,7 +367,7 @@ impl fmt::Display for QualifiedName<'_> {
 /// makes graceful termination different from aborting the task outright.
 pub(crate) async fn run_worker(
     supervisor_name: Arc<str>,
-    worker_id: ChildId,
+    worker_id: Arc<str>,
     mut worker: Box<dyn DynWorker>,
     control_tx: mpsc::UnboundedSender<SupervisorCommand>,
     init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,

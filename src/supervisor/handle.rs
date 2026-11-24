@@ -58,7 +58,7 @@ impl SupervisorHandle {
             // an abnormal exit is what makes the parent restart this subtree.
             if let Some(tx) = parent_tx {
                 let _send = tx.send(SupervisorCommand::ChildTerminated {
-                    id: runtime_name.to_string(),
+                    id: Arc::clone(&runtime_name),
                     reason,
                 });
             }
