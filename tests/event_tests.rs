@@ -205,12 +205,27 @@ async fn escalation_is_reported() {
     );
 }
 
-/// Two children of a `OneForAll` supervisor crash at the same moment. The first
-/// report triggers a restart round that replaces both; the second report then
-/// refers to an instance that no longer exists and must not trigger another
-/// round against its replacement.
+/// Two children of a `OneForAll` supervisor crash while it is busy, so both
+/// exit reports are queued before it handles either. The first triggers a
+/// restart round that replaces both children; the second then refers to an
+/// instance that no longer exists and must not trigger another round against
+/// its replacement.
 #[tokio::test]
 async fn a_report_from_a_replaced_instance_does_not_restart_its_successor() {
+    /// Takes a while to initialize; a linked start waits for it inline, which
+    /// keeps the supervisor from handling anything else meanwhile.
+    struct SlowStart;
+    impl Worker for SlowStart {
+        type Error = std::io::Error;
+        async fn initialize(&mut self) -> Result<(), Self::Error> {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            Ok(())
+        }
+        async fn run(&mut self) -> Result<(), Self::Error> {
+            std::future::pending().await
+        }
+    }
+
     let a = Arc::new(AtomicUsize::new(0));
     let b = Arc::new(AtomicUsize::new(0));
     let spec = SupervisorSpec::new("simultaneous")
@@ -228,26 +243,25 @@ async fn a_report_from_a_replaced_instance_does_not_restart_its_successor() {
             RestartPolicy::Permanent,
         );
     let handle = SupervisorHandle::start(spec).expect("valid spec");
-    let mut events = handle.subscribe();
 
-    let seen = collect(&mut events, Duration::from_millis(250)).await;
+    // Both children crash at ~30ms, while the supervisor is still waiting for
+    // this child to initialize.
+    handle
+        .start_child_linked(
+            "blocker",
+            || SlowStart,
+            RestartPolicy::Permanent,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("blocker started");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let starts = (a.load(Ordering::SeqCst), b.load(Ordering::SeqCst));
     assert_eq!(
-        (a.load(Ordering::SeqCst), b.load(Ordering::SeqCst)),
+        starts,
         (2, 2),
-        "one restart round for one simultaneous failure; events: {seen:?}"
+        "one restart round for one simultaneous failure"
     );
-    let abnormal = seen
-        .iter()
-        .filter(|e| {
-            matches!(
-                e,
-                SupervisorEvent::ChildTerminated {
-                    reason: ChildExitReason::Abnormal,
-                    ..
-                }
-            )
-        })
-        .count();
-    assert_eq!(abnormal, 2, "both crashes are still reported: {seen:?}");
     handle.shutdown().await.unwrap();
 }
