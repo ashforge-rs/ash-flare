@@ -29,11 +29,11 @@ impl Worker for SimpleWorker {
 }
 
 #[derive(Debug)]
-struct StatefulWorker {
+struct SharedContextWorker {
     id: u32,
     context: WorkerContext,
 }
-impl Worker for StatefulWorker {
+impl Worker for SharedContextWorker {
     type Error = std::io::Error;
 
     async fn run(&mut self) -> Result<(), Self::Error> {
@@ -65,18 +65,23 @@ impl Worker for CleanupWorker {
     }
 }
 
-/// Fails as soon as it starts, signalling `done` once it has been started
-/// `target` times. Used to drive a tight crash-restart loop.
+/// Fails as soon as it starts. Signals `first_start` on its first run and
+/// `done` once it has been restarted `restarts` times, so a benchmark can time
+/// the restarts alone, without the tree's startup.
 struct Crasher {
     starts: Arc<AtomicUsize>,
-    target: usize,
+    restarts: usize,
+    first_start: Arc<Notify>,
     done: Arc<Notify>,
 }
 impl Worker for Crasher {
     type Error = std::io::Error;
 
     async fn run(&mut self) -> Result<(), Self::Error> {
-        if self.starts.fetch_add(1, Ordering::SeqCst) + 1 == self.target {
+        let started = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
+        if started == 1 {
+            self.first_start.notify_one();
+        } else if started == self.restarts + 1 {
             self.done.notify_one();
         }
         Err(std::io::Error::other("crash"))
@@ -203,7 +208,9 @@ fn bench_cooperative_shutdown(c: &mut Criterion) {
 
 /// Time for a supervisor to carry out `RESTARTS` restarts of a crashing child,
 /// with no backoff and no fixed sleeps, so the supervisor's own restart path
-/// (bookkeeping, respawn, task spawn) is what gets measured.
+/// (bookkeeping, child lookup, respawn, task spawn) is what gets measured. The
+/// tree's startup is not timed. `one_for_one_1000` puts the crasher after 999
+/// idle siblings, the worst case for finding it by id.
 fn bench_restart_loop(c: &mut Criterion) {
     const RESTARTS: usize = 5_000;
 
@@ -214,6 +221,7 @@ fn bench_restart_loop(c: &mut Criterion) {
     for (label, strategy, siblings) in [
         ("one_for_one", RestartStrategy::OneForOne, 0),
         ("one_for_all_10", RestartStrategy::OneForAll, 9),
+        ("one_for_one_1000", RestartStrategy::OneForOne, 999),
     ] {
         group.bench_function(label, |b| {
             b.to_async(tokio::runtime::Runtime::new().unwrap())
@@ -221,8 +229,13 @@ fn bench_restart_loop(c: &mut Criterion) {
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
                         let starts = Arc::new(AtomicUsize::new(0));
+                        let first_start = Arc::new(Notify::new());
                         let done = Arc::new(Notify::new());
-                        let (s, d) = (Arc::clone(&starts), Arc::clone(&done));
+                        let (s, f, d) = (
+                            Arc::clone(&starts),
+                            Arc::clone(&first_start),
+                            Arc::clone(&done),
+                        );
 
                         let mut spec = SupervisorSpec::new("bench")
                             .with_restart_strategy(strategy)
@@ -239,14 +252,16 @@ fn bench_restart_loop(c: &mut Criterion) {
                             "crasher",
                             move || Crasher {
                                 starts: Arc::clone(&s),
-                                target: RESTARTS,
+                                restarts: RESTARTS,
+                                first_start: Arc::clone(&f),
                                 done: Arc::clone(&d),
                             },
                             RestartPolicy::Permanent,
                         );
 
-                        let started = std::time::Instant::now();
                         let handle = SupervisorHandle::start(spec);
+                        first_start.notified().await;
+                        let started = std::time::Instant::now();
                         done.notified().await;
                         total += started.elapsed();
 
@@ -298,8 +313,8 @@ fn bench_nested_supervisors(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_stateful_context_operations(c: &mut Criterion) {
-    let mut group = c.benchmark_group("stateful_context");
+fn bench_worker_context_operations(c: &mut Criterion) {
+    let mut group = c.benchmark_group("worker_context");
 
     let ctx = WorkerContext::new();
 
@@ -344,8 +359,8 @@ fn bench_stateful_context_operations(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_stateful_supervisor_startup(c: &mut Criterion) {
-    let mut group = c.benchmark_group("stateful_startup");
+fn bench_shared_context_startup(c: &mut Criterion) {
+    let mut group = c.benchmark_group("shared_context_startup");
 
     for worker_count in [5, 10, 20, 50].iter() {
         group.bench_with_input(
@@ -360,7 +375,7 @@ fn bench_stateful_supervisor_startup(c: &mut Criterion) {
                             let ctx = ctx.clone();
                             spec = spec.with_worker(
                                 format!("worker-{}", i),
-                                move || StatefulWorker {
+                                move || SharedContextWorker {
                                     id: i,
                                     context: ctx.clone(),
                                 },
@@ -491,8 +506,8 @@ criterion_group!(
     bench_cooperative_shutdown,
     bench_restart_loop,
     bench_nested_supervisors,
-    bench_stateful_context_operations,
-    bench_stateful_supervisor_startup,
+    bench_worker_context_operations,
+    bench_shared_context_startup,
     bench_restart_strategies,
     bench_dynamic_child_management,
     bench_which_children,
