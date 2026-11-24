@@ -1147,7 +1147,7 @@ async fn main() {
         .with_worker("alert-manager", || AlertManager, RestartPolicy::Permanent);
 
     println!("\n🚀 Starting supervision tree...\n");
-    let handle = SupervisorHandle::start(root_spec);
+    let handle = SupervisorHandle::start(root_spec).expect("valid supervisor spec");
 
     // Let it run for a bit
     sleep(Duration::from_secs(3)).await;

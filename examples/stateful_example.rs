@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             RestartPolicy::Temporary,
         );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     // Give workers time to run
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

@@ -82,7 +82,7 @@ async fn run_supervisor_server(socket_path: String) {
             RestartPolicy::Permanent,
         );
 
-    let supervisor = SupervisorHandle::start(spec);
+    let supervisor = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     let server = SupervisorServer::new(supervisor);
 

@@ -67,7 +67,7 @@ async fn started_twice_and_still_supervised(at: PanicIn) {
     let spec = SupervisorSpec::new("panics")
         .with_restart_backoff(RestartBackoff::none())
         .with_worker("w", panicky(&starts, at), RestartPolicy::Permanent);
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -102,7 +102,7 @@ async fn a_transient_worker_that_panics_counts_as_abnormal() {
             panicky(&starts, PanicIn::Run),
             RestartPolicy::Transient,
         );
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
@@ -133,7 +133,7 @@ async fn a_panicking_factory_does_not_take_the_supervisor_down() {
             },
             RestartPolicy::Permanent,
         );
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -155,7 +155,8 @@ async fn a_panicking_factory_does_not_take_the_supervisor_down() {
 
 #[tokio::test]
 async fn a_linked_start_reports_a_panic_in_initialize() {
-    let handle = SupervisorHandle::start(SupervisorSpec::new("linked-panic"));
+    let handle = SupervisorHandle::start(SupervisorSpec::new("linked-panic"))
+        .expect("valid supervisor spec");
     let starts = Arc::new(AtomicUsize::new(0));
 
     let result = handle

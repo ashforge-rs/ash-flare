@@ -50,7 +50,7 @@
 //!     .with_worker("counter-2", || Counter { id: 2, max: 5 }, RestartPolicy::Permanent);
 //!
 //! // Start supervision tree
-//! let handle = SupervisorHandle::start(spec);
+//! let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 //!
 //! // Query children
 //! let children = handle.which_children().await?;
@@ -105,7 +105,9 @@ pub mod python;
 
 // Re-export public API
 pub use restart::{RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy};
-pub use supervisor::{SupervisorError, SupervisorHandle, SupervisorSpec};
+pub use supervisor::{
+    ChildSpec, Shutdown, ShutdownOrder, SupervisorError, SupervisorHandle, SupervisorSpec,
+};
 pub use types::{ChildExitReason, ChildId, ChildInfo, ChildType, ShutdownSignal, WorkerContext};
 pub use worker::{Worker, WorkerFactory};
 

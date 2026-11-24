@@ -97,7 +97,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         supervisors: []
     };
 
-    let supervisor: SupervisorHandle = SupervisorHandle::start(spec);
+    let supervisor: SupervisorHandle =
+        SupervisorHandle::start(spec).expect("valid supervisor spec");
     println!("✓ Supervisor started\n");
 
     // Test 1: Successfully initialize a worker
@@ -127,7 +128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         workers: [],
         supervisors: []
     };
-    let bad_supervisor: SupervisorHandle = SupervisorHandle::start(bad_spec);
+    let bad_supervisor: SupervisorHandle =
+        SupervisorHandle::start(bad_spec).expect("valid supervisor spec");
 
     // Test 2: Worker that fails during initialization
     println!("--- Test 2: Worker with initialization failure ---");
@@ -156,7 +158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         workers: [],
         supervisors: []
     };
-    let slow_supervisor: SupervisorHandle = SupervisorHandle::start(slow_spec);
+    let slow_supervisor: SupervisorHandle =
+        SupervisorHandle::start(slow_spec).expect("valid supervisor spec");
 
     // Test 3: Worker that times out during initialization
     println!("--- Test 3: Worker with initialization timeout ---");

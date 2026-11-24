@@ -47,7 +47,7 @@ async fn test_stateful_workers_share_context() {
         .with_worker("counter-1", counter(1), RestartPolicy::Temporary)
         .with_worker("counter-2", counter(2), RestartPolicy::Temporary);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     // Wait for workers to complete
     sleep(Duration::from_millis(200)).await;
@@ -141,7 +141,7 @@ async fn test_stateful_worker_restart_preserves_context() {
         RestartPolicy::Permanent,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     // Wait for initial failure and restart
     sleep(Duration::from_millis(300)).await;

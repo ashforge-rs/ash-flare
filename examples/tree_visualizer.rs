@@ -226,7 +226,7 @@ async fn main() {
             RestartPolicy::Permanent,
         );
 
-    let root = SupervisorHandle::start(root_spec);
+    let root = SupervisorHandle::start(root_spec).expect("valid supervisor spec");
 
     // Give supervisors time to start
     sleep(Duration::from_millis(500)).await;

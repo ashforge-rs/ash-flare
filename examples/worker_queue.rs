@@ -170,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let supervisor = SupervisorHandle::start(supervisor_spec);
+    let supervisor = SupervisorHandle::start(supervisor_spec).expect("valid supervisor spec");
     println!("Started supervisor with {} workers\n", num_workers);
 
     // Enqueue all tasks

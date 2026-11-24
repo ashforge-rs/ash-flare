@@ -121,12 +121,12 @@ pub struct PySupervisorHandle {
 #[pymethods]
 impl PySupervisorHandle {
     #[staticmethod]
-    fn start(spec: &PySupervisorSpec) -> Self {
+    fn start(spec: &PySupervisorSpec) -> PyResult<Self> {
         let runtime = get_runtime();
         let _guard = runtime.enter();
-        PySupervisorHandle {
-            inner: SupervisorHandle::start(spec.inner.clone()),
-        }
+        SupervisorHandle::start(spec.inner.clone())
+            .map(|inner| PySupervisorHandle { inner })
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     fn name(&self) -> String {

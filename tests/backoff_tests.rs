@@ -44,7 +44,7 @@ async fn backoff_prevents_restart_busy_loop() {
             Duration::from_secs(5),
         ));
 
-    let _handle = SupervisorHandle::start(spec);
+    let _handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let count = attempts.load(Ordering::SeqCst);
@@ -63,7 +63,7 @@ async fn default_backoff_is_not_immediate() {
     let spec =
         crash_loop_spec(&attempts).with_restart_intensity(RestartIntensity::new(1_000_000, 600));
 
-    let _handle = SupervisorHandle::start(spec);
+    let _handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     let count = attempts.load(Ordering::SeqCst);
@@ -80,7 +80,7 @@ async fn supervisor_terminates_when_restart_intensity_exceeded() {
         .with_restart_intensity(RestartIntensity::new(2, 60))
         .with_restart_backoff(RestartBackoff::none());
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     // Give the supervisor time to blow through its intensity limit.
     tokio::time::sleep(Duration::from_millis(300)).await;

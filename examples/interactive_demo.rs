@@ -490,7 +490,7 @@ async fn main() {
 
     // Build and start the supervisor tree
     let tree_spec = create_demo_tree(stats.clone());
-    let root = SupervisorHandle::start(tree_spec);
+    let root = SupervisorHandle::start(tree_spec).expect("valid supervisor spec");
 
     println!("📦 Supervisor tree started!");
     println!("⏳ Initializing workers...\n");

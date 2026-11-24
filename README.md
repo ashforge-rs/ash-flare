@@ -65,7 +65,7 @@ let spec = SupervisorSpec::new("my_supervisor")
     .with_restart_delay(Duration::from_secs(5))
     .with_worker("worker", || MyWorker, RestartPolicy::Permanent);
 
-let handle = SupervisorHandle::start(spec);
+let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
 // Add a child at runtime, waiting for its `initialize` to succeed.
 handle.start_child_linked(
@@ -119,7 +119,7 @@ let spec = SupervisorSpec::new("pipeline")
     .with_worker("ingest", move || Ingest { ctx: a.clone() }, RestartPolicy::Transient)
     .with_worker("report", move || Report { ctx: b.clone() }, RestartPolicy::Transient);
 
-let handle = SupervisorHandle::start(spec);
+let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 handle.shutdown().await?;
 # Ok(())
 # }
@@ -232,7 +232,7 @@ let spec = SupervisorSpec::new("root")
     .with_shutdown_timeout(Duration::from_secs(5))
     .with_worker("pump", |signal| Pump { shutdown: signal }, RestartPolicy::Permanent);
 
-let handle = SupervisorHandle::start(spec);
+let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 handle.shutdown().await?;
 # Ok(())
 # }

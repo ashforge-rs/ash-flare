@@ -116,7 +116,7 @@ async fn main() {
     println!("  └─ root-worker");
     println!();
 
-    let handle = ash_flare::SupervisorHandle::start(root);
+    let handle = ash_flare::SupervisorHandle::start(root).expect("valid supervisor spec");
 
     // Let it run and watch restarts
     sleep(Duration::from_secs(15)).await;

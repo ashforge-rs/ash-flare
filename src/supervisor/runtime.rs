@@ -3,7 +3,7 @@
 use super::child::{Child, Children, stop_all};
 use super::error::SupervisorError;
 use super::handle::SupervisorHandle;
-use super::spec::{ChildSpec, SupervisorSpec};
+use super::spec::{ChildDef, ShutdownOrder, SupervisorSpec};
 use crate::restart::{BackoffTracker, RestartPolicy, RestartStrategy, RestartTracker};
 use crate::supervisor_common::{RestartDecision, decide_restart};
 use crate::types::{ChildExitReason, ChildId, ChildInfo};
@@ -87,6 +87,7 @@ pub(crate) struct SupervisorRuntime {
     restart_tracker: RestartTracker,
     backoff_tracker: BackoffTracker,
     shutdown_timeout: Duration,
+    shutdown_order: ShutdownOrder,
     created_at: std::time::Instant,
 }
 
@@ -101,12 +102,12 @@ impl SupervisorRuntime {
 
         for child_spec in spec.children {
             match child_spec {
-                ChildSpec::Worker(worker_spec) => {
+                ChildDef::Worker(worker_spec) => {
                     let worker =
                         WorkerProcess::spawn(worker_spec, Arc::clone(&name), control_tx.clone());
                     children.push(Child::Worker(worker));
                 }
-                ChildSpec::Supervisor(supervisor_spec) => {
+                ChildDef::Supervisor(supervisor_spec) => {
                     let supervisor = SupervisorHandle::start_supervised(
                         (*supervisor_spec).clone(),
                         control_tx.clone(),
@@ -128,6 +129,7 @@ impl SupervisorRuntime {
             restart_tracker: RestartTracker::new(spec.restart_intensity),
             backoff_tracker: BackoffTracker::new(spec.restart_backoff),
             shutdown_timeout: spec.shutdown_timeout,
+            shutdown_order: spec.shutdown_order,
             created_at: std::time::Instant::now(),
         }
     }
@@ -514,8 +516,13 @@ impl SupervisorRuntime {
     /// starts them again in their original order, in place. `Temporary`
     /// children leave supervision instead of being restarted.
     async fn restart_range(&mut self, position: usize) {
-        let timeout = self.shutdown_timeout;
-        stop_all(Self::affected_from(&mut self.children, position), timeout).await;
+        let (timeout, order) = (self.shutdown_timeout, self.shutdown_order);
+        stop_all(
+            Self::affected_from(&mut self.children, position),
+            timeout,
+            order,
+        )
+        .await;
 
         let mut dropped_any = false;
         for child in Self::affected_from(&mut self.children, position) {
@@ -547,7 +554,12 @@ impl SupervisorRuntime {
     }
 
     async fn shutdown_children(&mut self) {
-        stop_all(self.children.as_mut_slice(), self.shutdown_timeout).await;
+        stop_all(
+            self.children.as_mut_slice(),
+            self.shutdown_timeout,
+            self.shutdown_order,
+        )
+        .await;
         tracing::debug!(
             supervisor = %self.name,
             children = self.children.len(),

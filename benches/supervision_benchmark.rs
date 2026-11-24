@@ -124,7 +124,7 @@ fn bench_supervisor_startup(c: &mut Criterion) {
                             );
                         }
 
-                        let handle = SupervisorHandle::start(spec);
+                        let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
                         sleep(Duration::from_millis(10)).await;
                         let _ = handle.shutdown().await;
                     });
@@ -154,7 +154,7 @@ fn bench_supervisor_shutdown(c: &mut Criterion) {
                                 RestartPolicy::Temporary,
                             );
                         }
-                        let handle = SupervisorHandle::start(spec);
+                        let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
                         sleep(Duration::from_millis(10)).await;
 
                         // Measure shutdown time
@@ -190,7 +190,8 @@ fn bench_cooperative_shutdown(c: &mut Criterion) {
                                     RestartPolicy::Permanent,
                                 );
                             }
-                            let handle = SupervisorHandle::start(spec);
+                            let handle =
+                                SupervisorHandle::start(spec).expect("valid supervisor spec");
                             sleep(Duration::from_millis(5)).await;
 
                             let started = std::time::Instant::now();
@@ -259,7 +260,7 @@ fn bench_restart_loop(c: &mut Criterion) {
                             RestartPolicy::Permanent,
                         );
 
-                        let handle = SupervisorHandle::start(spec);
+                        let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
                         first_start.notified().await;
                         let started = std::time::Instant::now();
                         done.notified().await;
@@ -303,7 +304,7 @@ fn bench_nested_supervisors(c: &mut Criterion) {
                             .with_supervisor(prev_spec);
                     }
 
-                    let handle = SupervisorHandle::start(spec);
+                    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
                     sleep(Duration::from_millis(10)).await;
                     let _ = handle.shutdown().await;
                 });
@@ -383,7 +384,7 @@ fn bench_shared_context_startup(c: &mut Criterion) {
                             );
                         }
 
-                        let handle = SupervisorHandle::start(spec);
+                        let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
                         sleep(Duration::from_millis(10)).await;
                         let _ = handle.shutdown().await;
                     });
@@ -414,7 +415,7 @@ fn bench_restart_strategies(c: &mut Criterion) {
                         .with_worker("w2", || SimpleWorker { id: 2 }, RestartPolicy::Temporary)
                         .with_worker("w3", || SimpleWorker { id: 3 }, RestartPolicy::Temporary);
 
-                    let handle = SupervisorHandle::start(spec);
+                    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
                     sleep(Duration::from_millis(10)).await;
                     let _ = handle.shutdown().await;
                 });
@@ -431,7 +432,7 @@ fn bench_dynamic_child_management(c: &mut Criterion) {
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
                 let spec = SupervisorSpec::new("bench");
-                let handle = SupervisorHandle::start(spec);
+                let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
                 sleep(Duration::from_micros(10)).await;
 
                 let _ = handle
@@ -453,7 +454,7 @@ fn bench_dynamic_child_management(c: &mut Criterion) {
                     || SimpleWorker { id: 1 },
                     RestartPolicy::Temporary,
                 );
-                let handle = SupervisorHandle::start(spec);
+                let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
                 sleep(Duration::from_micros(10)).await;
 
                 let _ = handle.terminate_child("w1").await;
@@ -482,7 +483,7 @@ fn bench_which_children(c: &mut Criterion) {
                                 RestartPolicy::Temporary,
                             );
                         }
-                        let handle = SupervisorHandle::start(spec);
+                        let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
                         sleep(Duration::from_micros(10)).await;
 
                         let _ = black_box(handle.which_children().await);

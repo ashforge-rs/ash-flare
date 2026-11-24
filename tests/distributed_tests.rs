@@ -25,7 +25,7 @@ async fn test_remote_supervisor_tcp() {
         RestartPolicy::Permanent,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     let server = SupervisorServer::new(handle);
 
     // Start server in background
@@ -63,7 +63,7 @@ async fn test_remote_supervisor_unix() {
         .with_worker("worker-1", || TestWorker, RestartPolicy::Permanent)
         .with_worker("worker-2", || TestWorker, RestartPolicy::Permanent);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     let server = SupervisorServer::new(handle);
 
     // Start server in background
@@ -150,7 +150,7 @@ async fn test_remote_handle_connection() {
         RestartPolicy::Permanent,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     let server = SupervisorServer::new(handle);
 
     tokio::spawn(async move {
@@ -248,7 +248,8 @@ async fn a_handle_reuses_its_connection() {
 
     // A counting proxy in front of a real server: every connection the client
     // opens is counted, then forwarded.
-    let handle = SupervisorHandle::start(SupervisorSpec::new("reuse"));
+    let handle =
+        SupervisorHandle::start(SupervisorSpec::new("reuse")).expect("valid supervisor spec");
     let server_path =
         std::env::temp_dir().join(format!("ash-reuse-srv-{}.sock", std::process::id()));
     let server = SupervisorServer::new(handle.clone());

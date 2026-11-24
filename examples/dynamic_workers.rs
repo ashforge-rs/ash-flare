@@ -149,7 +149,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         supervisors: []
     };
 
-    let supervisor: SupervisorHandle = SupervisorHandle::start(spec);
+    let supervisor: SupervisorHandle =
+        SupervisorHandle::start(spec).expect("valid supervisor spec");
     println!("Started elastic worker pool\n");
 
     let sup_clone = supervisor.clone();

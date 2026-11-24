@@ -1,12 +1,13 @@
 //! Child management - handles both worker and supervisor children
 
 use super::handle::SupervisorHandle;
-use super::spec::SupervisorSpec;
+use super::spec::{Shutdown, ShutdownOrder, SupervisorSpec};
 use crate::restart::RestartPolicy;
 use crate::types::ChildType;
 use crate::worker::{WorkerProcess, deadline_after};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Represents either a worker or a nested supervisor in the supervision tree
 pub(crate) enum Child {
@@ -53,50 +54,101 @@ impl Child {
         }
     }
 
-    /// Stops the child, allowing `timeout` for a worker to wind down
-    /// cooperatively before its task is aborted. A nested supervisor is waited
-    /// on until its own children have stopped.
-    pub async fn shutdown(&mut self, timeout: std::time::Duration) {
+    /// How this child is stopped: its own [`Shutdown`] setting, or the
+    /// supervisor's timeout. Nested supervisors are always waited on, since
+    /// they apply their own children's settings.
+    fn shutdown_mode(&self, default_timeout: Duration) -> Shutdown {
         match self {
-            Child::Worker(w) => {
-                let _graceful = w.stop(timeout).await;
-            }
-            Child::Supervisor { handle, .. } => {
-                let _shutdown_result = handle.shutdown().await;
-            }
+            Child::Worker(w) => match w.spec.shutdown {
+                Some(Shutdown::Timeout(timeout)) if timeout.is_zero() => Shutdown::BrutalKill,
+                Some(mode) => mode,
+                None if default_timeout.is_zero() => Shutdown::BrutalKill,
+                None => Shutdown::Timeout(default_timeout),
+            },
+            Child::Supervisor { .. } => Shutdown::Infinity,
         }
+    }
+
+    /// Asks the child to stop without waiting for it. Returns what to wait on.
+    fn begin_stop(&mut self, default_timeout: Duration) -> PendingStop {
+        let mode = self.shutdown_mode(default_timeout);
+        match self {
+            Child::Worker(worker) => match mode {
+                Shutdown::BrutalKill => PendingStop::Abort,
+                Shutdown::Timeout(timeout) => {
+                    worker.request_stop();
+                    PendingStop::Worker(deadline_after(timeout))
+                }
+                Shutdown::Infinity => {
+                    worker.request_stop();
+                    PendingStop::Worker(None)
+                }
+            },
+            Child::Supervisor { handle, .. } => PendingStop::Supervisor(handle.begin_shutdown()),
+        }
+    }
+
+    /// Waits for a stop started with [`begin_stop`](Self::begin_stop).
+    async fn finish_stop(&mut self, pending: PendingStop) {
+        match (self, pending) {
+            (Child::Worker(worker), PendingStop::Abort) => {
+                let _stopped = worker.abort().await;
+            }
+            (Child::Worker(worker), PendingStop::Worker(deadline)) => {
+                let _graceful = worker.stop_by(deadline).await;
+            }
+            (_, PendingStop::Supervisor(Some(done))) => {
+                let _stopped = done.await;
+            }
+            _ => {}
+        }
+    }
+
+    /// Stops the child according to its shutdown setting and waits for it.
+    pub async fn shutdown(&mut self, default_timeout: Duration) {
+        let pending = self.begin_stop(default_timeout);
+        self.finish_stop(pending).await;
     }
 }
 
-/// Stops every child in `children` at the same time.
+/// A stop that has been requested but not yet waited for.
+enum PendingStop {
+    /// Abort the worker outright.
+    Abort,
+    /// Wait for the signalled worker until this deadline (`None`: forever).
+    Worker(Option<tokio::time::Instant>),
+    /// Wait for the nested supervisor to report it has stopped.
+    Supervisor(Option<tokio::sync::oneshot::Receiver<()>>),
+}
+
+/// Stops every child in `children`, each according to its own shutdown
+/// setting.
 ///
-/// All workers are signalled and all nested supervisors told to shut down
-/// before anything is waited on, and the workers share one deadline. Stopping
-/// them one after another would make the total time the *sum* of every child's
-/// cleanup (up to `timeout` per uncooperative worker) instead of the slowest.
-pub(crate) async fn stop_all(children: &mut [Child], timeout: std::time::Duration) {
-    let mut nested = Vec::new();
-    for child in children.iter_mut() {
-        match child {
-            Child::Worker(worker) => worker.request_stop(),
-            Child::Supervisor { handle, .. } => nested.push(handle.begin_shutdown()),
+/// With [`ShutdownOrder::Reverse`] children are stopped one at a time, last
+/// started first, so nothing is stopped while a later child that may depend on
+/// it is still running. With [`ShutdownOrder::Concurrent`] every child is asked
+/// first and then waited for, so the total time is the slowest child's rather
+/// than the sum.
+pub(crate) async fn stop_all(
+    children: &mut [Child],
+    default_timeout: Duration,
+    order: ShutdownOrder,
+) {
+    match order {
+        ShutdownOrder::Reverse => {
+            for child in children.iter_mut().rev() {
+                child.shutdown(default_timeout).await;
+            }
         }
-    }
-
-    let deadline = deadline_after(timeout);
-    for child in children.iter_mut() {
-        if let Child::Worker(worker) = child {
-            let _graceful = if timeout.is_zero() {
-                worker.abort().await
-            } else {
-                worker.stop_by(deadline).await
-            };
+        ShutdownOrder::Concurrent => {
+            let pending: Vec<PendingStop> = children
+                .iter_mut()
+                .map(|child| child.begin_stop(default_timeout))
+                .collect();
+            for (child, stop) in children.iter_mut().zip(pending) {
+                child.finish_stop(stop).await;
+            }
         }
-    }
-
-    // Nested supervisors apply their own shutdown timeout to their children.
-    for done in nested.into_iter().flatten() {
-        let _stopped = done.await;
     }
 }
 

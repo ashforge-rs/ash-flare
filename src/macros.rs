@@ -220,7 +220,10 @@ macro_rules! connect_supervisor {
     };
 }
 
-/// Create and start a distributed supervision system with server and client
+/// Create and start a distributed supervision system with server and client.
+///
+/// Evaluates to `Result<(SupervisorHandle, JoinHandle<..>), SupervisorError>`,
+/// failing if the described tree is invalid.
 ///
 /// # Examples
 ///
@@ -256,12 +259,13 @@ macro_rules! distributed_system {
                 workers: [ $(($id, $factory, $policy)),* ],
                 supervisors: [ $($sup),* ]
             };
-            let handle = $crate::SupervisorHandle::start(spec);
+            $crate::SupervisorHandle::start(spec).map(|handle| {
             let server = $crate::distributed::SupervisorServer::new(handle.clone());
             let server_task = tokio::spawn(async move {
                 server.listen_tcp($addr).await
             });
             (handle, server_task)
+            })
         }
     };
     (
@@ -279,12 +283,13 @@ macro_rules! distributed_system {
                 workers: [ $(($id, $factory, $policy)),* ],
                 supervisors: [ $($sup),* ]
             };
-            let handle = $crate::SupervisorHandle::start(spec);
+            $crate::SupervisorHandle::start(spec).map(|handle| {
             let server = $crate::distributed::SupervisorServer::new(handle.clone());
             let server_task = tokio::spawn(async move {
                 server.listen_unix($path).await
             });
             (handle, server_task)
+            })
         }
     };
 }

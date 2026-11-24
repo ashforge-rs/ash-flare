@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Start the supervisor
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     println!("👥 Workers: 3 bidders + 1 monitor");
     println!("📦 Shared store: WorkerContext with DashMap\n");

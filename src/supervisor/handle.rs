@@ -2,10 +2,10 @@
 
 use super::error::SupervisorError;
 use super::runtime::{StatusSnapshot, SupervisorCommand, SupervisorRuntime};
-use super::spec::SupervisorSpec;
+use super::spec::{ChildSpec, SupervisorSpec};
 use crate::restart::{RestartPolicy, RestartStrategy};
 use crate::types::{ChildId, ChildInfo};
-use crate::worker::{WorkerFactory, WorkerSpec};
+use crate::worker::WorkerFactory;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -23,9 +23,14 @@ impl SupervisorHandle {
     /// Spawns a supervisor tree based on the provided specification.
     ///
     /// Must be called from within a tokio runtime.
-    #[must_use]
-    pub fn start(spec: SupervisorSpec) -> Self {
-        Self::start_inner(spec, None)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SupervisorError::DuplicateChildId`] if two children of any
+    /// supervisor in the tree share an id. Nothing is started in that case.
+    pub fn start(spec: SupervisorSpec) -> Result<Self, SupervisorError> {
+        spec.validate()?;
+        Ok(Self::start_inner(spec, None))
     }
 
     /// Spawns a supervisor as the child of another one, reporting its own
@@ -108,7 +113,17 @@ impl SupervisorHandle {
         factory: impl WorkerFactory<M>,
         restart_policy: RestartPolicy,
     ) -> Result<ChildId, SupervisorError> {
-        let spec = WorkerSpec::new(id, factory, restart_policy);
+        self.start_child_spec(ChildSpec::new(id, factory).restart(restart_policy))
+            .await
+    }
+
+    /// Dynamically starts a worker described by a full [`ChildSpec`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor is shutting down or a child with this ID already exists.
+    pub async fn start_child_spec(&self, child: ChildSpec) -> Result<ChildId, SupervisorError> {
+        let spec = child.worker;
         self.request(|respond_to| SupervisorCommand::StartChild { spec, respond_to })
             .await?
     }
@@ -137,7 +152,22 @@ impl SupervisorHandle {
         restart_policy: RestartPolicy,
         timeout: Duration,
     ) -> Result<ChildId, SupervisorError> {
-        let spec = WorkerSpec::new(id, factory, restart_policy);
+        self.start_child_spec_linked(ChildSpec::new(id, factory).restart(restart_policy), timeout)
+            .await
+    }
+
+    /// Like [`start_child_linked`](Self::start_child_linked), for a worker
+    /// described by a full [`ChildSpec`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`start_child_linked`](Self::start_child_linked).
+    pub async fn start_child_spec_linked(
+        &self,
+        child: ChildSpec,
+        timeout: Duration,
+    ) -> Result<ChildId, SupervisorError> {
+        let spec = child.worker;
         self.request(|respond_to| SupervisorCommand::StartChildLinked {
             spec,
             timeout,

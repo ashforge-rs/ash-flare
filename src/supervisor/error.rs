@@ -15,6 +15,14 @@ pub enum SupervisorError {
     /// No child with this ID is supervised.
     #[error("child with id '{0}' not found - it may have already terminated")]
     ChildNotFound(String),
+    /// Two children of one supervisor share an id.
+    #[error("supervisor '{supervisor}' has more than one child with id '{child_id}'")]
+    DuplicateChildId {
+        /// Name of the supervisor whose children clash
+        supervisor: String,
+        /// The id used more than once
+        child_id: String,
+    },
     /// Child initialization failed.
     #[error("child '{child_id}' initialization failed: {reason}")]
     InitializationFailed {

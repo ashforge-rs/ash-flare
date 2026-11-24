@@ -75,7 +75,7 @@ async fn main() {
             RestartPolicy::Temporary, // Won't restart
         );
 
-    let supervisor = SupervisorHandle::start(spec);
+    let supervisor = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     sleep(Duration::from_secs(15)).await;
 

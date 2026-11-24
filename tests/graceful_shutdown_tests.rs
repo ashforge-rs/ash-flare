@@ -84,7 +84,7 @@ async fn shutdown_hook_runs_on_graceful_supervisor_shutdown() {
         RestartPolicy::Permanent,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(100)).await;
     handle.shutdown().await.expect("shutdown request");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -109,7 +109,7 @@ async fn shutdown_hook_runs_on_terminate_child() {
         RestartPolicy::Permanent,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(100)).await;
     handle.terminate_child("w").await.expect("terminate");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -138,7 +138,7 @@ async fn worker_ignoring_signal_is_still_cancelled_and_cleaned_up() {
             RestartPolicy::Permanent,
         );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(100)).await;
     handle.shutdown().await.expect("shutdown request");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -167,7 +167,7 @@ async fn slow_cleanup_is_bounded_by_shutdown_timeout() {
             RestartPolicy::Permanent,
         );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let started = std::time::Instant::now();
@@ -211,7 +211,7 @@ async fn plain_worker_api_still_works_without_signal() {
         RestartPolicy::Temporary,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(200)).await;
     handle.shutdown().await.expect("shutdown");
 
@@ -257,7 +257,7 @@ async fn shutdown_hook_can_write_to_a_shared_context() {
         RestartPolicy::Permanent,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(100)).await;
     handle.shutdown().await.expect("shutdown");
 
@@ -323,7 +323,7 @@ async fn shutdown_waits_for_the_whole_tree() {
         .with_worker("outer", cooperative(&cleaned), RestartPolicy::Permanent)
         .with_supervisor(nested);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(50)).await;
     handle.shutdown().await.expect("shutdown");
 
@@ -336,7 +336,8 @@ async fn shutdown_waits_for_the_whole_tree() {
     assert!(handle.shutdown().await.is_err(), "already stopped");
 }
 
-/// Children are stopped together and share one shutdown timeout, so the total
+/// With `ShutdownOrder::Concurrent`, children are stopped together and share one
+/// shutdown timeout, so the total
 /// is bounded by the timeout rather than growing with the number of children.
 #[tokio::test]
 async fn children_share_one_shutdown_timeout() {
@@ -356,7 +357,9 @@ async fn children_share_one_shutdown_timeout() {
     }
 
     let timeout = Duration::from_millis(200);
-    let mut spec = SupervisorSpec::new("root").with_shutdown_timeout(timeout);
+    let mut spec = SupervisorSpec::new("root")
+        .with_shutdown_timeout(timeout)
+        .with_shutdown_order(ash_flare::ShutdownOrder::Concurrent);
     for i in 0..3 {
         spec = spec.with_worker(
             format!("w{i}"),
@@ -365,7 +368,7 @@ async fn children_share_one_shutdown_timeout() {
         );
     }
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let started = std::time::Instant::now();
@@ -383,7 +386,8 @@ async fn children_share_one_shutdown_timeout() {
     );
 }
 
-/// A `RestForOne` restart stops the affected siblings together, so restarting
+/// With `ShutdownOrder::Concurrent`, a `RestForOne` restart stops the affected
+/// siblings together, so restarting
 /// them takes about one cleanup rather than one per sibling.
 #[tokio::test]
 async fn rest_for_one_stops_affected_siblings_together() {
@@ -429,6 +433,7 @@ async fn rest_for_one_stops_affected_siblings_together() {
     let crasher = Arc::clone(&crasher_starts);
     let mut spec = SupervisorSpec::new("root")
         .with_restart_strategy(RestartStrategy::RestForOne)
+        .with_shutdown_order(ash_flare::ShutdownOrder::Concurrent)
         .with_restart_backoff(RestartBackoff::none())
         .with_worker(
             "crasher",
@@ -451,7 +456,7 @@ async fn rest_for_one_stops_affected_siblings_together() {
         );
     }
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     // Crash at ~50ms. Stopped together, every sibling is back by ~150ms; one
     // after another, the last would only be back at ~450ms.
     tokio::time::sleep(Duration::from_millis(300)).await;

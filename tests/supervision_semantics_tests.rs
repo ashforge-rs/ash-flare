@@ -104,7 +104,7 @@ async fn one_for_all_restarts_each_child_exactly_once_per_failure() {
         )
         .with_worker("sibling", idle_child(&sibling), RestartPolicy::Permanent);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(300)).await;
 
     assert_eq!(
@@ -145,7 +145,7 @@ async fn one_for_all_keeps_a_transient_sibling_under_supervision() {
         )
         .with_worker("sibling", idle_child(&sibling), RestartPolicy::Transient);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(300)).await;
 
     let mut ids: Vec<String> = handle
@@ -184,7 +184,7 @@ async fn one_for_all_drops_a_temporary_sibling() {
         )
         .with_worker("sibling", idle_child(&sibling), RestartPolicy::Temporary);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(300)).await;
 
     let ids: Vec<String> = handle
@@ -228,7 +228,7 @@ async fn children_after_a_dropped_temporary_are_still_found_by_id() {
         )
         .with_worker("later", idle_child(&later), RestartPolicy::Permanent);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(300)).await;
 
     let ids: Vec<String> = handle
@@ -274,7 +274,7 @@ async fn rest_for_one_restarts_the_tail_exactly_once() {
         )
         .with_worker("last", idle_child(&after), RestartPolicy::Permanent);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(300)).await;
 
     assert_eq!(
@@ -311,7 +311,7 @@ async fn a_backing_off_child_does_not_stall_the_supervisor() {
         .with_restart_delay(Duration::from_secs(10))
         .with_worker("crasher", crash_once(&crasher), RestartPolicy::Permanent);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     // Let the child fail and the supervisor enter its backoff.
     sleep(Duration::from_millis(100)).await;
@@ -363,7 +363,7 @@ async fn a_parent_restarts_a_nested_supervisor_that_escalated() {
         ))
         .with_supervisor(nested);
 
-    let handle = SupervisorHandle::start(parent);
+    let handle = SupervisorHandle::start(parent).expect("valid supervisor spec");
     sleep(Duration::from_millis(500)).await;
 
     assert!(

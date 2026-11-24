@@ -149,6 +149,8 @@ pub(crate) struct WorkerSpec {
     pub id: Arc<str>,
     factory: ErasedFactory,
     pub restart_policy: RestartPolicy,
+    /// How the worker is stopped; `None` uses the supervisor's timeout.
+    pub shutdown: Option<crate::supervisor::Shutdown>,
 }
 
 impl WorkerSpec {
@@ -161,6 +163,7 @@ impl WorkerSpec {
             id: Arc::from(id.into()),
             factory: Arc::new(move |signal| Box::new(factory.create(signal))),
             restart_policy,
+            shutdown: None,
         }
     }
 
@@ -174,6 +177,7 @@ impl fmt::Debug for WorkerSpec {
         f.debug_struct("WorkerSpec")
             .field("id", &self.id)
             .field("restart_policy", &self.restart_policy)
+            .field("shutdown", &self.shutdown)
             .finish_non_exhaustive()
     }
 }
@@ -257,19 +261,6 @@ impl WorkerProcess {
             handle: Some(handle),
             shutdown_tx,
         }
-    }
-
-    /// Stops the worker, giving it `timeout` to wind down cooperatively before
-    /// aborting the task.
-    ///
-    /// Returns `true` if the worker stopped on its own (so its `shutdown` hook
-    /// ran), `false` if it had to be aborted.
-    pub(crate) async fn stop(&mut self, timeout: std::time::Duration) -> bool {
-        self.request_stop();
-        if timeout.is_zero() {
-            return self.abort().await;
-        }
-        self.stop_by(deadline_after(timeout)).await
     }
 
     /// Sends the cooperative shutdown signal without waiting for the worker.

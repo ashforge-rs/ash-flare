@@ -203,7 +203,7 @@ async fn main() {
         )
         .with_worker("alerts", || AlertManager::new(), RestartPolicy::Permanent);
 
-    let supervisor = SupervisorHandle::start(spec);
+    let supervisor = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     // Let the system run
     println!("✨ Monitoring system is running...\n");

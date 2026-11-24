@@ -1,25 +1,111 @@
 //! Supervisor specification and builder
 
+use super::error::SupervisorError;
 use crate::restart::{RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy};
 use crate::worker::{WorkerFactory, WorkerSpec};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Specification for a child (either worker or supervisor)
+/// A child as declared in a [`SupervisorSpec`]: a worker or a nested supervisor.
 #[derive(Clone)]
-pub(crate) enum ChildSpec {
+pub(crate) enum ChildDef {
     Worker(WorkerSpec),
     Supervisor(Arc<SupervisorSpec>),
 }
 
-impl ChildSpec {
+impl ChildDef {
     /// Identifier this child will be registered under.
-    #[cfg(feature = "python")]
     pub(crate) fn id(&self) -> &str {
         match self {
-            ChildSpec::Worker(w) => &w.id,
-            ChildSpec::Supervisor(s) => &s.name,
+            ChildDef::Worker(w) => &w.id,
+            ChildDef::Supervisor(s) => &s.name,
         }
+    }
+}
+
+/// How a child is stopped when its supervisor terminates it, as in OTP's
+/// `shutdown` child-spec field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shutdown {
+    /// Abort the worker's task at once. Its `shutdown` hook does not run.
+    BrutalKill,
+    /// Send the [`ShutdownSignal`](crate::ShutdownSignal) and wait up to this
+    /// long for the worker to stop, then abort it. `Duration::ZERO` behaves
+    /// like [`Shutdown::BrutalKill`].
+    Timeout(Duration),
+    /// Send the signal and wait for the worker however long it takes.
+    Infinity,
+}
+
+/// The order in which a supervisor stops several children at once: on its own
+/// shutdown and on a `OneForAll` or `RestForOne` restart.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownOrder {
+    /// One at a time, last started first, as OTP does. A child is never
+    /// stopped while a child started after it, which may depend on it, is
+    /// still running.
+    #[default]
+    Reverse,
+    /// All at once. Stopping is as fast as the slowest child, but children may
+    /// still be running while the ones they depend on stop.
+    Concurrent,
+}
+
+/// Full specification of a worker child, for when the defaults of
+/// [`SupervisorSpec::with_worker`] are not enough.
+///
+/// ```
+/// use ash_flare::{ChildSpec, RestartPolicy, Shutdown, SupervisorSpec, Worker};
+/// use std::time::Duration;
+///
+/// struct Flusher;
+/// impl Worker for Flusher {
+///     type Error = std::io::Error;
+///     async fn run(&mut self) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
+/// let spec = SupervisorSpec::new("app").with_child(
+///     ChildSpec::new("flusher", || Flusher)
+///         .restart(RestartPolicy::Transient)
+///         .shutdown(Shutdown::Timeout(Duration::from_secs(30))),
+/// );
+/// ```
+#[derive(Clone, Debug)]
+pub struct ChildSpec {
+    pub(crate) worker: WorkerSpec,
+}
+
+impl ChildSpec {
+    /// A permanent worker built by `factory`, stopped with the supervisor's
+    /// shutdown timeout. The factory may take no arguments or the worker's
+    /// [`ShutdownSignal`](crate::ShutdownSignal).
+    pub fn new<M>(id: impl Into<String>, factory: impl WorkerFactory<M>) -> Self {
+        Self {
+            worker: WorkerSpec::new(id, factory, RestartPolicy::Permanent),
+        }
+    }
+
+    /// Sets when the child is restarted. Defaults to
+    /// [`RestartPolicy::Permanent`].
+    #[must_use]
+    pub fn restart(mut self, policy: RestartPolicy) -> Self {
+        self.worker.restart_policy = policy;
+        self
+    }
+
+    /// Sets how the child is stopped, overriding the supervisor's
+    /// [shutdown timeout](SupervisorSpec::with_shutdown_timeout).
+    #[must_use]
+    pub fn shutdown(mut self, shutdown: Shutdown) -> Self {
+        self.worker.shutdown = Some(shutdown);
+        self
+    }
+
+    /// The child's id.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.worker.id
     }
 }
 
@@ -50,11 +136,12 @@ impl ChildSpec {
 #[derive(Clone)]
 pub struct SupervisorSpec {
     pub(crate) name: String,
-    pub(crate) children: Vec<ChildSpec>,
+    pub(crate) children: Vec<ChildDef>,
     pub(crate) restart_strategy: RestartStrategy,
     pub(crate) restart_intensity: RestartIntensity,
     pub(crate) restart_backoff: RestartBackoff,
     pub(crate) shutdown_timeout: Duration,
+    pub(crate) shutdown_order: ShutdownOrder,
 }
 
 /// Default grace period a worker gets to stop cooperatively before being aborted.
@@ -70,6 +157,7 @@ impl SupervisorSpec {
             restart_intensity: RestartIntensity::default(),
             restart_backoff: RestartBackoff::default(),
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
+            shutdown_order: ShutdownOrder::default(),
         }
     }
 
@@ -77,6 +165,25 @@ impl SupervisorSpec {
     #[cfg(feature = "python")]
     pub(crate) fn has_child(&self, id: &str) -> bool {
         self.children.iter().any(|c| c.id() == id)
+    }
+
+    /// Checks this spec and every nested one: child ids must be unique within
+    /// each supervisor, since children are found, restarted and terminated by
+    /// id.
+    pub(crate) fn validate(&self) -> Result<(), SupervisorError> {
+        let mut seen = HashSet::with_capacity(self.children.len());
+        for child in &self.children {
+            if !seen.insert(child.id()) {
+                return Err(SupervisorError::DuplicateChildId {
+                    supervisor: self.name.clone(),
+                    child_id: child.id().to_owned(),
+                });
+            }
+            if let ChildDef::Supervisor(nested) = child {
+                nested.validate()?;
+            }
+        }
+        Ok(())
     }
 
     /// Sets the restart strategy for this supervisor.
@@ -130,6 +237,21 @@ impl SupervisorSpec {
         self
     }
 
+    /// Sets the order in which children are stopped together. Defaults to
+    /// [`ShutdownOrder::Reverse`].
+    #[must_use]
+    pub fn with_shutdown_order(mut self, order: ShutdownOrder) -> Self {
+        self.shutdown_order = order;
+        self
+    }
+
+    /// Adds a worker child described by a full [`ChildSpec`].
+    #[must_use]
+    pub fn with_child(mut self, child: ChildSpec) -> Self {
+        self.children.push(ChildDef::Worker(child.worker));
+        self
+    }
+
     /// Adds a worker child to this supervisor specification.
     ///
     /// The factory is called to create a fresh worker on first start and on
@@ -158,24 +280,19 @@ impl SupervisorSpec {
     /// for example a [`WorkerContext`](crate::WorkerContext).
     #[must_use]
     pub fn with_worker<M>(
-        mut self,
+        self,
         id: impl Into<String>,
         factory: impl WorkerFactory<M>,
         restart_policy: RestartPolicy,
     ) -> Self {
-        self.children.push(ChildSpec::Worker(WorkerSpec::new(
-            id,
-            factory,
-            restart_policy,
-        )));
-        self
+        self.with_child(ChildSpec::new(id, factory).restart(restart_policy))
     }
 
     /// Adds a nested supervisor child to this supervisor specification.
     #[must_use]
     pub fn with_supervisor(mut self, supervisor: SupervisorSpec) -> Self {
         self.children
-            .push(ChildSpec::Supervisor(Arc::new(supervisor)));
+            .push(ChildDef::Supervisor(Arc::new(supervisor)));
         self
     }
 }

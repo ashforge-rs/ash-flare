@@ -120,12 +120,12 @@ pub struct PyStatefulSupervisorHandle {
 #[pymethods]
 impl PyStatefulSupervisorHandle {
     #[staticmethod]
-    fn start(spec: &PyStatefulSupervisorSpec) -> Self {
+    fn start(spec: &PyStatefulSupervisorSpec) -> PyResult<Self> {
         let runtime = get_runtime();
         let _guard = runtime.enter();
-        PyStatefulSupervisorHandle {
-            inner: SupervisorHandle::start(spec.inner.clone()),
-        }
+        SupervisorHandle::start(spec.inner.clone())
+            .map(|inner| PyStatefulSupervisorHandle { inner })
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     fn name(&self) -> String {
