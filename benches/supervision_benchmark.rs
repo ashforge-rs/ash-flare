@@ -1,10 +1,8 @@
 use ash_flare::{
-    RestartIntensity, RestartPolicy, RestartStrategy, StatefulSupervisorHandle,
-    StatefulSupervisorSpec, SupervisorHandle, SupervisorSpec, Worker, WorkerContext,
+    RestartIntensity, RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker,
+    WorkerContext,
 };
-use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -17,8 +15,6 @@ use tokio::time::sleep;
 struct SimpleWorker {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for SimpleWorker {
     type Error = std::io::Error;
 
@@ -31,10 +27,8 @@ impl Worker for SimpleWorker {
 #[derive(Debug)]
 struct StatefulWorker {
     id: u32,
-    context: Arc<WorkerContext>,
+    context: WorkerContext,
 }
-
-#[async_trait]
 impl Worker for StatefulWorker {
     type Error = std::io::Error;
 
@@ -208,19 +202,21 @@ fn bench_stateful_supervisor_startup(c: &mut Criterion) {
             |b, &count| {
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async move {
-                        let mut spec = StatefulSupervisorSpec::new("bench");
+                        let ctx = WorkerContext::new();
+                        let mut spec = SupervisorSpec::new("bench");
                         for i in 0..count {
+                            let ctx = ctx.clone();
                             spec = spec.with_worker(
                                 format!("worker-{}", i),
-                                move |ctx| StatefulWorker {
+                                move || StatefulWorker {
                                     id: i,
-                                    context: ctx,
+                                    context: ctx.clone(),
                                 },
                                 RestartPolicy::Temporary,
                             );
                         }
 
-                        let handle = StatefulSupervisorHandle::start(spec);
+                        let handle = SupervisorHandle::start(spec);
                         sleep(Duration::from_millis(10)).await;
                         let _ = handle.shutdown().await;
                     });

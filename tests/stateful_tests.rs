@@ -1,16 +1,12 @@
-use ash_flare::{
-    RestartPolicy, StatefulSupervisorHandle, StatefulSupervisorSpec, Worker, WorkerContext,
-};
-use async_trait::async_trait;
-use std::sync::Arc;
+//! Workers sharing state through a `WorkerContext` captured by their factories.
+
+use ash_flare::{RestartPolicy, SupervisorHandle, SupervisorSpec, Worker, WorkerContext};
 use tokio::time::{Duration, sleep};
 
 struct StatefulCounter {
     id: u32,
-    context: Arc<WorkerContext>,
+    context: WorkerContext,
 }
-
-#[async_trait]
 impl Worker for StatefulCounter {
     type Error = std::io::Error;
 
@@ -38,28 +34,20 @@ impl Worker for StatefulCounter {
 
 #[tokio::test]
 async fn test_stateful_workers_share_context() {
-    let spec = StatefulSupervisorSpec::new("stateful-test")
-        .with_worker(
-            "counter-1",
-            |ctx| StatefulCounter {
-                id: 1,
-                context: ctx,
-            },
-            RestartPolicy::Temporary,
-        )
-        .with_worker(
-            "counter-2",
-            |ctx| StatefulCounter {
-                id: 2,
-                context: ctx,
-            },
-            RestartPolicy::Temporary,
-        );
+    let context = WorkerContext::new();
+    let counter = |id| {
+        let context = context.clone();
+        move || StatefulCounter {
+            id,
+            context: context.clone(),
+        }
+    };
 
-    // Get reference to context before starting
-    let context = Arc::clone(spec.context());
+    let spec = SupervisorSpec::new("stateful-test")
+        .with_worker("counter-1", counter(1), RestartPolicy::Temporary)
+        .with_worker("counter-2", counter(2), RestartPolicy::Temporary);
 
-    let handle = StatefulSupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec);
 
     // Wait for workers to complete
     sleep(Duration::from_millis(200)).await;
@@ -112,10 +100,8 @@ async fn test_context_operations() {
 async fn test_stateful_worker_restart_preserves_context() {
     struct FailingCounter {
         id: u32,
-        context: Arc<WorkerContext>,
+        context: WorkerContext,
     }
-
-    #[async_trait]
     impl Worker for FailingCounter {
         type Error = std::io::Error;
 
@@ -144,17 +130,18 @@ async fn test_stateful_worker_restart_preserves_context() {
         }
     }
 
-    let spec = StatefulSupervisorSpec::new("restart-test").with_worker(
+    let context = WorkerContext::new();
+    let factory_context = context.clone();
+    let spec = SupervisorSpec::new("restart-test").with_worker(
         "failing-counter",
-        |ctx| FailingCounter {
+        move || FailingCounter {
             id: 1,
-            context: ctx,
+            context: factory_context.clone(),
         },
         RestartPolicy::Permanent,
     );
 
-    let context = Arc::clone(spec.context());
-    let handle = StatefulSupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec);
 
     // Wait for initial failure and restart
     sleep(Duration::from_millis(300)).await;

@@ -28,7 +28,7 @@ async fn test_supervisor_duplicate_child() {
 
 #[tokio::test]
 async fn test_supervisor_terminate_nonexistent() {
-    let spec = SupervisorSpec::<QuickWorker>::new("terminate-test");
+    let spec = SupervisorSpec::new("terminate-test");
     let handle = SupervisorHandle::start(spec);
 
     let result = handle.terminate_child("nonexistent").await;

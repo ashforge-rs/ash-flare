@@ -9,13 +9,9 @@ async fn main() {
     println!("=== IoT Fleet Management - Cluster Control ===\n");
 
     // Connect to both regional supervisors
-    let us_west = RemoteSupervisorHandle::connect_unix("/tmp/supervisor-us-west.sock")
-        .await
-        .expect("Failed to connect to US-West supervisor");
+    let us_west = RemoteSupervisorHandle::unix("/tmp/supervisor-us-west.sock");
 
-    let eu_west = RemoteSupervisorHandle::connect_unix("/tmp/supervisor-eu-west.sock")
-        .await
-        .expect("Failed to connect to EU-West supervisor");
+    let eu_west = RemoteSupervisorHandle::unix("/tmp/supervisor-eu-west.sock");
 
     println!("✓ Connected to US-West regional supervisor");
     println!("✓ Connected to EU-West regional supervisor\n");

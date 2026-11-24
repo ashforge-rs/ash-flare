@@ -1,7 +1,6 @@
 //! Telemetry ingestion and processing example - IoT data pipeline
 
 use ash_flare::{RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,37 +23,6 @@ impl std::error::Error for TelemetryError {}
 struct TelemetryData {
     device_id: u32,
     payload: f64,
-}
-
-enum TelemetryWorker {
-    Ingester(TelemetryIngester),
-    Processor(TelemetryProcessor),
-}
-
-#[async_trait]
-impl Worker for TelemetryWorker {
-    type Error = TelemetryError;
-
-    async fn initialize(&mut self) -> Result<(), Self::Error> {
-        match self {
-            TelemetryWorker::Ingester(w) => w.initialize().await,
-            TelemetryWorker::Processor(w) => w.initialize().await,
-        }
-    }
-
-    async fn run(&mut self) -> Result<(), Self::Error> {
-        match self {
-            TelemetryWorker::Ingester(w) => w.run().await,
-            TelemetryWorker::Processor(w) => w.run().await,
-        }
-    }
-
-    async fn shutdown(&mut self) -> Result<(), Self::Error> {
-        match self {
-            TelemetryWorker::Ingester(w) => w.shutdown().await,
-            TelemetryWorker::Processor(w) => w.shutdown().await,
-        }
-    }
 }
 
 struct TelemetryIngester {
@@ -81,8 +49,6 @@ impl TelemetryIngester {
         Ok(())
     }
 }
-
-#[async_trait]
 impl Worker for TelemetryIngester {
     type Error = TelemetryError;
 
@@ -160,8 +126,6 @@ impl TelemetryProcessor {
         self.buffer.clear();
     }
 }
-
-#[async_trait]
 impl Worker for TelemetryProcessor {
     type Error = TelemetryError;
 
@@ -217,12 +181,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_restart_strategy(RestartStrategy::OneForOne)
         .with_worker(
             "ingester",
-            move || TelemetryWorker::Ingester(TelemetryIngester::new(tx.clone())),
+            move || TelemetryIngester::new(tx.clone()),
             RestartPolicy::Permanent,
         )
         .with_worker(
             "processor",
-            move || TelemetryWorker::Processor(TelemetryProcessor::new(Arc::clone(&rx), 10)),
+            move || TelemetryProcessor::new(Arc::clone(&rx), 10),
             RestartPolicy::Permanent,
         );
 

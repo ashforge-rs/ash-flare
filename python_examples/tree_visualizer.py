@@ -79,10 +79,12 @@ def render_supervisor_tree(root_handle):
 def build_example_tree():
     """Build a complex supervisor tree for demonstration"""
     
-    # Dummy worker function (does nothing, just for tree structure)
-    def dummy_worker():
-        import time
-        time.sleep(3600)  # Sleep for a long time
+    # Dummy worker (does nothing, just for tree structure). Polling
+    # `should_stop` lets `shutdown()` return promptly instead of waiting out
+    # the shutdown timeout for every worker.
+    def dummy_worker(should_stop):
+        while not should_stop():
+            time.sleep(0.1)
     
     # Create leaf supervisors with workers
     db_supervisor = af.SupervisorSpec("database-pool")

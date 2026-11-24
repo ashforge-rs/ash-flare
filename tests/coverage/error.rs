@@ -1,23 +1,6 @@
 use ash_flare::SupervisorError;
 
 #[test]
-fn test_supervisor_error_no_children() {
-    let err = SupervisorError::NoChildren("test-supervisor".to_string());
-    let msg = format!("{}", err);
-    assert!(msg.contains("test-supervisor"));
-    assert!(msg.contains("has no children"));
-}
-
-#[test]
-fn test_supervisor_error_all_children_failed() {
-    let err = SupervisorError::AllChildrenFailed("main-supervisor".to_string());
-    let msg = format!("{}", err);
-    assert!(msg.contains("main-supervisor"));
-    assert!(msg.contains("all children failed"));
-    assert!(msg.contains("restart intensity limit exceeded"));
-}
-
-#[test]
 fn test_supervisor_error_shutting_down() {
     let err = SupervisorError::ShuttingDown("service-supervisor".to_string());
     let msg = format!("{}", err);
@@ -46,9 +29,9 @@ fn test_supervisor_error_child_not_found() {
 
 #[test]
 fn test_supervisor_error_debug() {
-    let err = SupervisorError::NoChildren("test".to_string());
+    let err = SupervisorError::ChildNotFound("test".to_string());
     let debug_str = format!("{:?}", err);
-    assert!(debug_str.contains("NoChildren"));
+    assert!(debug_str.contains("ChildNotFound"));
     assert!(debug_str.contains("test"));
 }
 
@@ -62,8 +45,6 @@ fn test_supervisor_error_is_error() {
 #[test]
 fn test_all_error_variants() {
     let errors = vec![
-        SupervisorError::NoChildren("sup1".to_string()),
-        SupervisorError::AllChildrenFailed("sup2".to_string()),
         SupervisorError::ShuttingDown("sup3".to_string()),
         SupervisorError::ChildAlreadyExists("child1".to_string()),
         SupervisorError::ChildNotFound("child2".to_string()),
@@ -79,7 +60,7 @@ fn test_all_error_variants() {
 
 #[test]
 fn test_error_display_formatting() {
-    let err = SupervisorError::NoChildren("my-supervisor".to_string());
+    let err = SupervisorError::ShuttingDown("my-supervisor".to_string());
     let display = err.to_string();
     let formatted = format!("{}", err);
     assert_eq!(display, formatted);
@@ -87,7 +68,7 @@ fn test_error_display_formatting() {
 
 #[test]
 fn test_error_with_empty_name() {
-    let err = SupervisorError::NoChildren("".to_string());
+    let err = SupervisorError::ChildNotFound("".to_string());
     let msg = format!("{}", err);
     assert!(msg.contains("''"));
 }

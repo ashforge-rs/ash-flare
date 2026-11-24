@@ -1,7 +1,6 @@
 //! Minimal counter example showing different restart policies
 
 use ash_flare::{RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -29,8 +28,6 @@ impl Counter {
         }
     }
 }
-
-#[async_trait]
 impl Worker for Counter {
     type Error = CounterError;
 

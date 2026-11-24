@@ -2,7 +2,7 @@
 
 use super::context::PyWorkerContext;
 use crate::types::ShutdownSignal;
-use crate::worker::{Worker, WorkerError};
+use crate::worker::Worker;
 use pyo3::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +29,7 @@ pub struct PyWorker {
     pub(crate) shutdown: ShutdownSignal,
     /// The in-flight Python call. A `spawn_blocking` task cannot be cancelled,
     /// so this is kept across a cancellation of `run` and joined in `shutdown`.
-    body: Option<tokio::task::JoinHandle<Result<(), WorkerError>>>,
+    body: Option<tokio::task::JoinHandle<Result<(), String>>>,
 }
 
 impl PyWorker {
@@ -93,9 +93,8 @@ impl PyShouldStop {
     }
 }
 
-#[async_trait::async_trait]
 impl Worker for PyWorker {
-    type Error = WorkerError;
+    type Error = String;
 
     async fn run(&mut self) -> Result<(), Self::Error> {
         let callable = Arc::clone(&self.callable);
@@ -134,7 +133,7 @@ impl Worker for PyWorker {
                     // Report through Python's own logging so the failure is
                     // visible by default instead of vanishing silently.
                     log_worker_failure(py, &name, &detail);
-                    WorkerError::WorkerFailed(format!("worker '{name}' raised: {detail}"))
+                    format!("worker '{name}' raised: {detail}")
                 })
             })
         }));
@@ -143,9 +142,7 @@ impl Worker for PyWorker {
         // is dropped for a cooperative shutdown, `shutdown` joins it there
         // rather than leaving the Python callable running unsupervised.
         let Some(handle) = self.body.as_mut() else {
-            return Err(WorkerError::WorkerFailed(
-                "worker body handle went missing".to_owned(),
-            ));
+            return Err("worker body handle went missing".to_owned());
         };
         let result = handle.await;
         self.body = None;
@@ -154,14 +151,8 @@ impl Worker for PyWorker {
 
         match result {
             Ok(inner) => inner,
-            Err(join_err) => Err(WorkerError::WorkerFailed(format!(
-                "worker task failed to run: {join_err}"
-            ))),
+            Err(join_err) => Err(format!("worker task failed to run: {join_err}")),
         }
-    }
-
-    async fn initialize(&mut self) -> Result<(), Self::Error> {
-        Ok(())
     }
 
     /// Waits for a Python callable that is still running after `run` was

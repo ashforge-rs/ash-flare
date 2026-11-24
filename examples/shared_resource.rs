@@ -1,7 +1,6 @@
 //! Shared resource access example - multiple workers sharing a resource pool
 
 use ash_flare::{RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -107,8 +106,6 @@ impl ResourceWorker {
         Ok(())
     }
 }
-
-#[async_trait]
 impl Worker for ResourceWorker {
     type Error = WorkerError;
 

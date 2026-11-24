@@ -4,19 +4,19 @@ use super::handle::SupervisorHandle;
 use super::spec::SupervisorSpec;
 use crate::restart::RestartPolicy;
 use crate::types::ChildType;
-use crate::worker::{Worker, WorkerProcess};
+use crate::worker::WorkerProcess;
 use std::sync::Arc;
 
 /// Represents either a worker or a nested supervisor in the supervision tree
-pub(crate) enum Child<W: Worker> {
-    Worker(WorkerProcess<W>),
+pub(crate) enum Child {
+    Worker(WorkerProcess),
     Supervisor {
-        handle: SupervisorHandle<W>,
-        spec: Arc<SupervisorSpec<W>>,
+        handle: SupervisorHandle,
+        spec: Arc<SupervisorSpec>,
     },
 }
 
-impl<W: Worker> Child<W> {
+impl Child {
     #[inline]
     pub fn id(&self) -> &str {
         match self {
@@ -33,19 +33,10 @@ impl<W: Worker> Child<W> {
         }
     }
 
+    /// The child's restart policy: `None` for nested supervisors, which have no
+    /// policy of their own and are always treated as permanent.
     #[inline]
-    #[allow(clippy::unnecessary_wraps)]
     pub fn restart_policy(&self) -> Option<RestartPolicy> {
-        match self {
-            Child::Worker(w) => Some(w.spec.restart_policy),
-            Child::Supervisor { .. } => Some(RestartPolicy::Permanent),
-        }
-    }
-
-    /// Policy as seen by the shared restart decision: `None` for nested
-    /// supervisors, which are always treated as permanent.
-    #[inline]
-    pub fn restart_policy_for_decision(&self) -> Option<RestartPolicy> {
         match self {
             Child::Worker(w) => Some(w.spec.restart_policy),
             Child::Supervisor { .. } => None,
@@ -53,7 +44,8 @@ impl<W: Worker> Child<W> {
     }
 
     /// Stops the child, allowing `timeout` for a worker to wind down
-    /// cooperatively before its task is aborted.
+    /// cooperatively before its task is aborted. A nested supervisor is waited
+    /// on until its own children have stopped.
     pub async fn shutdown(&mut self, timeout: std::time::Duration) {
         match self {
             Child::Worker(w) => {

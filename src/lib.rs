@@ -14,7 +14,9 @@
 //! - **Graceful Shutdown**: Workers are asked to stop via a
 //!   [`ShutdownSignal`] and get their `shutdown` hook run before being aborted
 //! - **Distributed**: Run supervisors across processes or machines via TCP/Unix sockets
-//! - **Generic Workers**: Trait-based worker system for any async workload
+//! - **Heterogeneous Trees**: Workers of different types mix freely in one tree
+//! - **Shared State**: [`WorkerContext`], a concurrent key-value store workers
+//!   can share and that survives their restarts
 //! - **Dynamic Management**: Add/remove children at runtime
 //! - **Structured Logging**: Built-in support for `tracing` structured logging
 //! - **Mailbox System**: Optional message-passing for workers with string-based messages
@@ -23,14 +25,12 @@
 //!
 //! ```rust
 //! use ash_flare::{SupervisorSpec, SupervisorHandle, RestartPolicy, Worker};
-//! use async_trait::async_trait;
 //!
 //! struct Counter {
 //!     id: u32,
 //!     max: u32,
 //! }
 //!
-//! #[async_trait]
 //! impl Worker for Counter {
 //!     type Error = std::io::Error;
 //!
@@ -55,7 +55,7 @@
 //! // Query children
 //! let children = handle.which_children().await?;
 //!
-//! // Graceful shutdown
+//! // Graceful shutdown; returns once every worker has stopped
 //! handle.shutdown().await?;
 //! # Ok(())
 //! # }
@@ -69,7 +69,7 @@
 //!
 //! # Examples
 //!
-//! See the [examples directory](https://github.com/gntem/ash-flare/tree/master/examples) for more:
+//! See the [examples directory](https://github.com/ashforge-rs/ash-flare/tree/master/examples) for more:
 //!
 //! - `counter.rs` - Basic supervisor with multiple workers
 //! - `distributed.rs` - Network-distributed supervisors
@@ -96,7 +96,6 @@ mod worker;
 
 pub mod distributed;
 pub mod mailbox;
-pub mod supervisor_stateful;
 
 // Python bindings module, compiled only for the `python` feature so pure-Rust
 // consumers do not pull in pyo3 or link against Python.
@@ -106,11 +105,8 @@ pub mod python;
 // Re-export public API
 pub use restart::{RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy};
 pub use supervisor::{SupervisorError, SupervisorHandle, SupervisorSpec};
-pub use supervisor_stateful::{
-    StatefulSupervisorError, StatefulSupervisorHandle, StatefulSupervisorSpec,
-};
 pub use types::{ChildExitReason, ChildId, ChildInfo, ChildType, ShutdownSignal, WorkerContext};
-pub use worker::{Worker, WorkerError};
+pub use worker::{Worker, WorkerFactory};
 
 // Re-export mailbox types
 pub use mailbox::{Mailbox, MailboxConfig, MailboxHandle, SendError, TryRecvError, TrySendError};

@@ -20,6 +20,8 @@
 //! malformed payload is rejected as an error rather than causing undefined
 //! behaviour — but validation is not a substitute for access control.
 
+// The `Archived*` types rkyv generates for the wire format carry no docs of
+// their own; every hand-written item here is documented.
 #![allow(missing_docs)]
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -32,7 +34,7 @@ use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::{ChildInfo as SupervisorChildInfo, ChildType, RestartPolicy, SupervisorHandle, Worker};
+use crate::{ChildInfo, RestartStrategy, SupervisorHandle};
 
 /// Maximum accepted frame size (10 MiB).
 ///
@@ -51,7 +53,6 @@ pub enum SupervisorAddress {
 }
 
 /// Commands that can be sent to a remote supervisor
-#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
 #[rkyv(derive(Debug))]
 #[rkyv(attr(allow(missing_docs)))]
@@ -70,7 +71,6 @@ pub enum RemoteCommand {
 }
 
 /// Responses from remote supervisor
-#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
 #[rkyv(derive(Debug))]
 #[rkyv(attr(allow(missing_docs)))]
@@ -85,32 +85,7 @@ pub enum RemoteResponse {
     Error(String),
 }
 
-/// Information about a child process (simplified for serialization)
-#[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
-#[rkyv(derive(Debug))]
-#[rkyv(attr(allow(missing_docs)))]
-pub struct ChildInfo {
-    /// Unique identifier for the child
-    pub id: String,
-    /// Type of child (Worker or Supervisor)
-    pub child_type: ChildType,
-    /// Restart policy for the child (None for supervisors)
-    pub restart_policy: Option<RestartPolicy>,
-}
-
-impl From<SupervisorChildInfo> for ChildInfo {
-    fn from(info: SupervisorChildInfo) -> Self {
-        Self {
-            id: info.id,
-            child_type: info.child_type,
-            restart_policy: info.restart_policy,
-        }
-    }
-}
-
 /// Status information about a supervisor
-#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
 #[rkyv(derive(Debug))]
 #[rkyv(attr(allow(missing_docs)))]
@@ -120,7 +95,7 @@ pub struct SupervisorStatus {
     /// Number of children currently running
     pub children_count: usize,
     /// Restart strategy being used
-    pub restart_strategy: String,
+    pub restart_strategy: RestartStrategy,
     /// Uptime in seconds
     pub uptime_secs: u64,
 }
@@ -132,32 +107,31 @@ pub struct RemoteSupervisorHandle {
 }
 
 impl RemoteSupervisorHandle {
-    /// Create a new handle to a remote supervisor
+    /// Creates a handle to a remote supervisor.
+    ///
+    /// No connection is made here: each command opens its own connection, so
+    /// an unreachable address surfaces as an error from the first command.
     #[must_use]
     pub fn new(address: SupervisorAddress) -> Self {
         Self { address }
     }
 
-    /// Connect to a TCP supervisor
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the address is invalid.
-    #[allow(clippy::unused_async)]
-    pub async fn connect_tcp(addr: impl Into<String>) -> Result<Self, DistributedError> {
-        let address = SupervisorAddress::Tcp(addr.into());
-        Ok(Self { address })
+    /// Creates a handle to a supervisor listening on TCP `addr` (`host:port`).
+    #[must_use]
+    pub fn tcp(addr: impl Into<String>) -> Self {
+        Self::new(SupervisorAddress::Tcp(addr.into()))
     }
 
-    /// Connect to a Unix socket supervisor
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the path is invalid.
-    #[allow(clippy::unused_async)]
-    pub async fn connect_unix(path: impl Into<String>) -> Result<Self, DistributedError> {
-        let address = SupervisorAddress::Unix(path.into());
-        Ok(Self { address })
+    /// Creates a handle to a supervisor listening on the Unix socket at `path`.
+    #[must_use]
+    pub fn unix(path: impl Into<String>) -> Self {
+        Self::new(SupervisorAddress::Unix(path.into()))
+    }
+
+    /// The address commands are sent to.
+    #[must_use]
+    pub fn address(&self) -> &SupervisorAddress {
+        &self.address
     }
 
     /// Send a command to the remote supervisor
@@ -243,14 +217,14 @@ impl RemoteSupervisorHandle {
 }
 
 /// Server that wraps a `SupervisorHandle` and accepts remote commands
-pub struct SupervisorServer<W: Worker> {
-    handle: Arc<SupervisorHandle<W>>,
+pub struct SupervisorServer {
+    handle: Arc<SupervisorHandle>,
 }
 
-impl<W: Worker> SupervisorServer<W> {
+impl SupervisorServer {
     /// Create a new supervisor server wrapping a `SupervisorHandle`
     #[must_use]
-    pub fn new(handle: SupervisorHandle<W>) -> Self {
+    pub fn new(handle: SupervisorHandle) -> Self {
         Self {
             handle: Arc::new(handle),
         }
@@ -321,7 +295,7 @@ impl<W: Worker> SupervisorServer<W> {
 
     async fn handle_connection<S>(
         stream: &mut S,
-        handle: Arc<SupervisorHandle<W>>,
+        handle: Arc<SupervisorHandle>,
     ) -> Result<(), DistributedError>
     where
         S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -332,20 +306,14 @@ impl<W: Worker> SupervisorServer<W> {
         Ok(())
     }
 
-    async fn process_command(
-        command: RemoteCommand,
-        handle: &SupervisorHandle<W>,
-    ) -> RemoteResponse {
+    async fn process_command(command: RemoteCommand, handle: &SupervisorHandle) -> RemoteResponse {
         match command {
             RemoteCommand::Shutdown => match handle.shutdown().await {
                 Ok(()) => RemoteResponse::Ok,
                 Err(e) => RemoteResponse::Error(e.to_string()),
             },
             RemoteCommand::WhichChildren => match handle.which_children().await {
-                Ok(children) => {
-                    let child_list: Vec<ChildInfo> = children.into_iter().map(Into::into).collect();
-                    RemoteResponse::Children(child_list)
-                }
+                Ok(children) => RemoteResponse::Children(children),
                 Err(e) => RemoteResponse::Error(e.to_string()),
             },
             RemoteCommand::TerminateChild { id } => match handle.terminate_child(&id).await {
@@ -353,18 +321,18 @@ impl<W: Worker> SupervisorServer<W> {
                 Err(e) => RemoteResponse::Error(e.to_string()),
             },
             RemoteCommand::Status => {
-                let restart_strategy = handle
-                    .restart_strategy()
-                    .await
-                    .map_or_else(|_| "Unknown".to_owned(), |s| format!("{s:?}"));
-                let uptime_secs = handle.uptime().await.unwrap_or(0);
-
-                RemoteResponse::Status(SupervisorStatus {
-                    name: handle.name().to_owned(),
-                    children_count: handle.which_children().await.map_or(0, |c| c.len()),
-                    restart_strategy,
-                    uptime_secs,
-                })
+                let status = async {
+                    Ok::<_, crate::SupervisorError>(SupervisorStatus {
+                        name: handle.name().to_owned(),
+                        children_count: handle.which_children().await?.len(),
+                        restart_strategy: handle.restart_strategy().await?,
+                        uptime_secs: handle.uptime().await?.as_secs(),
+                    })
+                };
+                match status.await {
+                    Ok(current) => RemoteResponse::Status(current),
+                    Err(e) => RemoteResponse::Error(e.to_string()),
+                }
             }
         }
     }

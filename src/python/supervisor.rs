@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::supervisor::{SupervisorHandle, SupervisorSpec};
-use crate::types::ChildType;
+use crate::types::{ChildType, ShutdownSignal};
 
 use super::types::{PyChildInfo, PyRestartIntensity, PyRestartPolicy, PyRestartStrategy};
 use super::worker::PyWorker;
@@ -23,7 +23,7 @@ use super::{block_on_without_gil, duration_from_secs, ensure_callable, get_runti
 /// `start_child` already errors on duplicates; without this check a spec could
 /// silently accumulate two children sharing an id, which then behave
 /// unpredictably because lookups match whichever comes first.
-fn ensure_unique_id(spec: &SupervisorSpec<PyWorker>, id: &str) -> PyResult<()> {
+pub(crate) fn ensure_unique_id(spec: &SupervisorSpec, id: &str) -> PyResult<()> {
     if spec.has_child(id) {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "a child with id '{id}' is already registered on this spec"
@@ -35,7 +35,7 @@ fn ensure_unique_id(spec: &SupervisorSpec<PyWorker>, id: &str) -> PyResult<()> {
 /// Python-facing supervisor specification
 #[pyclass(name = "SupervisorSpec")]
 pub struct PySupervisorSpec {
-    pub(crate) inner: SupervisorSpec<PyWorker>,
+    pub(crate) inner: SupervisorSpec,
 }
 
 #[pymethods]
@@ -96,12 +96,13 @@ impl PySupervisorSpec {
         let id_clone = id.clone();
         let worker_fn_arc = Arc::new(worker_fn.clone_ref(py));
 
-        self.inner = std::mem::replace(&mut self.inner, SupervisorSpec::new("temp"))
-            .with_worker_signal(
-                id,
-                move |signal| PyWorker::new(id_clone.clone(), Arc::clone(&worker_fn_arc), signal),
-                policy,
-            );
+        self.inner = std::mem::replace(&mut self.inner, SupervisorSpec::new("temp")).with_worker(
+            id,
+            move |signal: ShutdownSignal| {
+                PyWorker::new(id_clone.clone(), Arc::clone(&worker_fn_arc), signal)
+            },
+            policy,
+        );
         Ok(())
     }
 
@@ -114,7 +115,7 @@ impl PySupervisorSpec {
 /// Python-facing supervisor handle
 #[pyclass(name = "SupervisorHandle")]
 pub struct PySupervisorHandle {
-    inner: SupervisorHandle<PyWorker>,
+    inner: SupervisorHandle,
 }
 
 #[pymethods]
@@ -148,6 +149,7 @@ impl PySupervisorHandle {
     fn uptime(&self, py: Python<'_>) -> PyResult<u64> {
         let handle = self.inner.clone();
         block_on_without_gil(py, async move { handle.uptime().await })
+            .map(|uptime| uptime.as_secs())
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to get uptime: {e}")))
     }
 
@@ -201,9 +203,9 @@ impl PySupervisorHandle {
 
         let result = block_on_without_gil(py, async move {
             handle
-                .start_child_with_signal(
+                .start_child(
                     id,
-                    move |signal| {
+                    move |signal: ShutdownSignal| {
                         PyWorker::new(id_clone.clone(), Arc::clone(&worker_fn_arc), signal)
                     },
                     policy,
@@ -233,9 +235,9 @@ impl PySupervisorHandle {
 
         let result = block_on_without_gil(py, async move {
             handle
-                .start_child_linked_with_signal(
+                .start_child_linked(
                     id,
-                    move |signal| {
+                    move |signal: ShutdownSignal| {
                         PyWorker::new(id_clone.clone(), Arc::clone(&worker_fn_arc), signal)
                     },
                     policy,

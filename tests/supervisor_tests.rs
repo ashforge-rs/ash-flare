@@ -2,7 +2,6 @@ use ash_flare::{
     ChildType, RestartIntensity, RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec,
     Worker,
 };
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::time::{Duration, sleep};
@@ -10,8 +9,6 @@ use tokio::time::{Duration, sleep};
 struct SimpleWorker {
     counter: Arc<AtomicU32>,
 }
-
-#[async_trait]
 impl Worker for SimpleWorker {
     type Error = std::io::Error;
 
@@ -25,7 +22,7 @@ impl Worker for SimpleWorker {
 
 #[tokio::test]
 async fn test_supervisor_start_and_shutdown() {
-    let spec: SupervisorSpec<SimpleWorker> = SupervisorSpec::new("test-supervisor");
+    let spec: SupervisorSpec = SupervisorSpec::new("test-supervisor");
     let handle = SupervisorHandle::start(spec);
 
     assert_eq!(handle.name(), "test-supervisor");
@@ -117,13 +114,13 @@ async fn test_supervisor_terminate_child() {
 
 #[tokio::test]
 async fn test_supervisor_restart_strategies() {
-    let spec_one_for_one: SupervisorSpec<SimpleWorker> =
+    let spec_one_for_one: SupervisorSpec =
         SupervisorSpec::new("test-one-for-one").with_restart_strategy(RestartStrategy::OneForOne);
 
-    let spec_one_for_all: SupervisorSpec<SimpleWorker> =
+    let spec_one_for_all: SupervisorSpec =
         SupervisorSpec::new("test-one-for-all").with_restart_strategy(RestartStrategy::OneForAll);
 
-    let spec_rest_for_one: SupervisorSpec<SimpleWorker> =
+    let spec_rest_for_one: SupervisorSpec =
         SupervisorSpec::new("test-rest-for-one").with_restart_strategy(RestartStrategy::RestForOne);
 
     let h1 = SupervisorHandle::start(spec_one_for_one);
@@ -137,7 +134,7 @@ async fn test_supervisor_restart_strategies() {
 
 #[tokio::test]
 async fn test_supervisor_restart_intensity() {
-    let spec: SupervisorSpec<SimpleWorker> =
+    let spec: SupervisorSpec =
         SupervisorSpec::new("test").with_restart_intensity(RestartIntensity {
             max_restarts: 10,
             within_seconds: 5,

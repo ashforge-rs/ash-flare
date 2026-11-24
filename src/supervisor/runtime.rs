@@ -7,19 +7,20 @@ use super::spec::{ChildSpec, SupervisorSpec};
 use crate::restart::{BackoffTracker, RestartPolicy, RestartStrategy, RestartTracker};
 use crate::supervisor_common::{RestartDecision, decide_restart};
 use crate::types::{ChildExitReason, ChildId, ChildInfo};
-use crate::worker::{Worker, WorkerProcess, WorkerSpec, WorkerTermination};
+use crate::worker::{WorkerProcess, WorkerSpec};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 /// Internal commands sent to supervisor runtime
-pub(crate) enum SupervisorCommand<W: Worker> {
+pub(crate) enum SupervisorCommand {
     StartChild {
-        spec: WorkerSpec<W>,
+        spec: WorkerSpec,
         respond_to: oneshot::Sender<Result<ChildId, SupervisorError>>,
     },
     StartChildLinked {
-        spec: WorkerSpec<W>,
-        timeout: std::time::Duration,
+        spec: WorkerSpec,
+        timeout: Duration,
         respond_to: oneshot::Sender<Result<ChildId, SupervisorError>>,
     },
     TerminateChild {
@@ -27,13 +28,13 @@ pub(crate) enum SupervisorCommand<W: Worker> {
         respond_to: oneshot::Sender<Result<(), SupervisorError>>,
     },
     WhichChildren {
-        respond_to: oneshot::Sender<Result<Vec<ChildInfo>, SupervisorError>>,
+        respond_to: oneshot::Sender<Vec<ChildInfo>>,
     },
     GetRestartStrategy {
         respond_to: oneshot::Sender<RestartStrategy>,
     },
     GetUptime {
-        respond_to: oneshot::Sender<u64>,
+        respond_to: oneshot::Sender<Duration>,
     },
     ChildTerminated {
         id: ChildId,
@@ -46,21 +47,16 @@ pub(crate) enum SupervisorCommand<W: Worker> {
         id: ChildId,
         strategy: RestartStrategy,
     },
-    Shutdown,
-}
-
-impl<W: Worker> From<WorkerTermination> for SupervisorCommand<W> {
-    fn from(term: WorkerTermination) -> Self {
-        SupervisorCommand::ChildTerminated {
-            id: term.id,
-            reason: term.reason,
-        }
-    }
+    /// Stops every child, then the supervisor itself. `respond_to` is told
+    /// once the children are down.
+    Shutdown {
+        respond_to: Option<oneshot::Sender<()>>,
+    },
 }
 
 /// Whether the runtime loop should keep serving commands or terminate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RuntimeControl {
+enum RuntimeControl {
     /// Keep processing commands.
     Continue,
     /// Terminate the supervisor task.
@@ -68,23 +64,23 @@ pub(crate) enum RuntimeControl {
 }
 
 /// Internal state machine that manages supervisor lifecycle and child processes
-pub(crate) struct SupervisorRuntime<W: Worker> {
+pub(crate) struct SupervisorRuntime {
     name: String,
-    children: Vec<Child<W>>,
-    control_rx: mpsc::UnboundedReceiver<SupervisorCommand<W>>,
-    control_tx: mpsc::UnboundedSender<SupervisorCommand<W>>,
+    children: Vec<Child>,
+    control_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
+    control_tx: mpsc::UnboundedSender<SupervisorCommand>,
     restart_strategy: RestartStrategy,
     restart_tracker: RestartTracker,
     backoff_tracker: BackoffTracker,
-    shutdown_timeout: std::time::Duration,
+    shutdown_timeout: Duration,
     created_at: std::time::Instant,
 }
 
-impl<W: Worker> SupervisorRuntime<W> {
+impl SupervisorRuntime {
     pub(crate) fn new(
-        spec: SupervisorSpec<W>,
-        control_rx: mpsc::UnboundedReceiver<SupervisorCommand<W>>,
-        control_tx: mpsc::UnboundedSender<SupervisorCommand<W>>,
+        spec: SupervisorSpec,
+        control_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
+        control_tx: mpsc::UnboundedSender<SupervisorCommand>,
     ) -> Self {
         let mut children = Vec::with_capacity(spec.children.len());
 
@@ -150,7 +146,7 @@ impl<W: Worker> SupervisorRuntime<W> {
                     let _send = respond_to.send(self.restart_strategy);
                 }
                 SupervisorCommand::GetUptime { respond_to } => {
-                    let uptime = self.created_at.elapsed().as_secs();
+                    let uptime = self.created_at.elapsed();
                     let _send = respond_to.send(uptime);
                 }
                 SupervisorCommand::ChildTerminated { id, reason } => {
@@ -165,8 +161,14 @@ impl<W: Worker> SupervisorRuntime<W> {
                 SupervisorCommand::RestartChild { id, strategy } => {
                     self.handle_restart_child(&id, strategy).await;
                 }
-                SupervisorCommand::Shutdown => {
+                SupervisorCommand::Shutdown { respond_to } => {
                     self.shutdown_children().await;
+                    // Close before acknowledging, so a caller whose `shutdown`
+                    // has returned already sees the handle as stopped.
+                    self.control_rx.close();
+                    if let Some(tx) = respond_to {
+                        let _send = tx.send(());
+                    }
                     return ChildExitReason::Shutdown;
                 }
             }
@@ -176,7 +178,7 @@ impl<W: Worker> SupervisorRuntime<W> {
         ChildExitReason::Shutdown
     }
 
-    fn handle_start_child(&mut self, spec: WorkerSpec<W>) -> Result<ChildId, SupervisorError> {
+    fn handle_start_child(&mut self, spec: WorkerSpec) -> Result<ChildId, SupervisorError> {
         // Check if child with same ID already exists
         if self.children.iter().any(|c| c.id() == spec.id) {
             return Err(SupervisorError::ChildAlreadyExists(spec.id.clone()));
@@ -197,8 +199,8 @@ impl<W: Worker> SupervisorRuntime<W> {
 
     async fn handle_start_child_linked(
         &mut self,
-        spec: WorkerSpec<W>,
-        timeout: std::time::Duration,
+        spec: WorkerSpec,
+        timeout: Duration,
     ) -> Result<ChildId, SupervisorError> {
         // Check if child with same ID already exists
         if self.children.iter().any(|c| c.id() == spec.id) {
@@ -290,19 +292,15 @@ impl<W: Worker> SupervisorRuntime<W> {
         Ok(())
     }
 
-    #[allow(clippy::unnecessary_wraps)]
-    fn handle_which_children(&self) -> Result<Vec<ChildInfo>, SupervisorError> {
-        let info = self
-            .children
+    fn handle_which_children(&self) -> Vec<ChildInfo> {
+        self.children
             .iter()
             .map(|child| ChildInfo {
                 id: child.id().to_owned(),
                 child_type: child.child_type(),
                 restart_policy: child.restart_policy(),
             })
-            .collect();
-
-        Ok(info)
+            .collect()
     }
 
     #[allow(clippy::indexing_slicing)]
@@ -330,7 +328,7 @@ impl<W: Worker> SupervisorRuntime<W> {
         // Supervision semantics live in one shared place; this runtime only
         // carries out the decision.
         let decision = decide_restart(
-            self.children[position].restart_policy_for_decision(),
+            self.children[position].restart_policy(),
             reason,
             self.restart_strategy,
             &mut self.restart_tracker,
@@ -380,7 +378,7 @@ impl<W: Worker> SupervisorRuntime<W> {
     ///
     /// Sleeping inline would stall `Shutdown`, `which_children` and every other
     /// command for the whole backoff - up to 30s with the default settings.
-    fn defer_restart(&self, id: ChildId, delay: std::time::Duration, strategy: RestartStrategy) {
+    fn defer_restart(&self, id: ChildId, delay: Duration, strategy: RestartStrategy) {
         tracing::debug!(
             supervisor = %self.name,
             child = %id,
@@ -472,16 +470,16 @@ impl<W: Worker> SupervisorRuntime<W> {
     ///
     /// A `Temporary` child is never restarted, not even when it was a sibling's
     /// failure that stopped it, so it leaves supervision here.
-    fn leaves_supervision(child: &Child<W>) -> bool {
+    fn leaves_supervision(child: &Child) -> bool {
         child.restart_policy() == Some(RestartPolicy::Temporary)
     }
 
     /// Replaces a child that has been shut down with a freshly started one,
     /// returning its id.
     fn respawn(
-        child: &mut Child<W>,
+        child: &mut Child,
         supervisor_name: &str,
-        control_tx: &mpsc::UnboundedSender<SupervisorCommand<W>>,
+        control_tx: &mpsc::UnboundedSender<SupervisorCommand>,
     ) -> ChildId {
         match child {
             Child::Worker(worker) => {

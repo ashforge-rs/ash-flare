@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 use crate::distributed::{RemoteSupervisorHandle, SupervisorAddress};
 
 use super::block_on_without_gil;
-use super::types::{PyChildInfo, PyChildType};
+use super::types::PyChildInfo;
 
 /// Python-facing supervisor address for distributed supervision
 #[pyclass(name = "SupervisorAddress", skip_from_py_object)]
@@ -55,26 +55,20 @@ pub struct PyRemoteSupervisorHandle {
 #[pymethods]
 impl PyRemoteSupervisorHandle {
     #[staticmethod]
-    fn connect_tcp(addr: String, py: Python<'_>) -> PyResult<Self> {
-        let result = block_on_without_gil(py, async move {
-            RemoteSupervisorHandle::connect_tcp(addr).await
-        });
-
-        result
-            .map(|inner| PyRemoteSupervisorHandle { inner })
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to connect: {e}")))
+    fn connect_tcp(addr: String) -> Self {
+        // No I/O happens here: each command opens its own connection.
+        PyRemoteSupervisorHandle {
+            inner: RemoteSupervisorHandle::tcp(addr),
+        }
     }
 
     #[staticmethod]
     #[cfg(unix)]
-    fn connect_unix(path: String, py: Python<'_>) -> PyResult<Self> {
-        let result = block_on_without_gil(py, async move {
-            RemoteSupervisorHandle::connect_unix(path).await
-        });
-
-        result
-            .map(|inner| PyRemoteSupervisorHandle { inner })
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to connect: {e}")))
+    fn connect_unix(path: String) -> Self {
+        // No I/O happens here: each command opens its own connection.
+        PyRemoteSupervisorHandle {
+            inner: RemoteSupervisorHandle::unix(path),
+        }
     }
 
     fn shutdown(&self, py: Python<'_>) -> PyResult<()> {
@@ -88,20 +82,7 @@ impl PyRemoteSupervisorHandle {
         let result = block_on_without_gil(py, async move { handle.which_children().await });
 
         match result {
-            Ok(children) => {
-                // Convert distributed::ChildInfo to types::ChildInfo then to PyChildInfo
-                let py_children = children
-                    .into_iter()
-                    .map(|child| PyChildInfo {
-                        id: child.id,
-                        child_type: PyChildType {
-                            inner: child.child_type,
-                        },
-                        restart_policy: child.restart_policy,
-                    })
-                    .collect();
-                Ok(py_children)
-            }
+            Ok(children) => Ok(children.into_iter().map(PyChildInfo::from).collect()),
             Err(e) => Err(PyRuntimeError::new_err(format!(
                 "Failed to get children: {e}"
             ))),

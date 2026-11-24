@@ -2,12 +2,9 @@ use ash_flare::distributed::{
     RemoteCommand, RemoteResponse, RemoteSupervisorHandle, SupervisorAddress, SupervisorServer,
 };
 use ash_flare::{RestartPolicy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use tokio::time::{Duration, sleep};
 
 struct TestWorker;
-
-#[async_trait]
 impl Worker for TestWorker {
     type Error = std::io::Error;
 
@@ -38,9 +35,7 @@ async fn test_remote_supervisor_tcp() {
     sleep(Duration::from_millis(100)).await;
 
     // Connect to server
-    let remote = RemoteSupervisorHandle::connect_tcp("127.0.0.1:9001")
-        .await
-        .unwrap();
+    let remote = RemoteSupervisorHandle::tcp("127.0.0.1:9001");
 
     // Test which_children command
     let children = remote.which_children().await.unwrap();
@@ -79,9 +74,7 @@ async fn test_remote_supervisor_unix() {
     sleep(Duration::from_millis(100)).await;
 
     // Connect to server
-    let remote = RemoteSupervisorHandle::connect_unix(socket_path)
-        .await
-        .unwrap();
+    let remote = RemoteSupervisorHandle::unix(socket_path);
 
     // Test which_children command
     let children = remote.which_children().await.unwrap();
@@ -164,9 +157,7 @@ async fn test_remote_handle_connection() {
 
     sleep(Duration::from_millis(100)).await;
 
-    let remote = RemoteSupervisorHandle::connect_tcp("127.0.0.1:9002")
-        .await
-        .unwrap();
+    let remote = RemoteSupervisorHandle::tcp("127.0.0.1:9002");
 
     // Multiple commands to same connection
     let children1 = remote.which_children().await.unwrap();

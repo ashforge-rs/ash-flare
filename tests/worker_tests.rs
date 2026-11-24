@@ -1,5 +1,4 @@
 use ash_flare::{RestartPolicy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::time::{Duration, sleep};
@@ -8,8 +7,6 @@ struct TestWorker {
     counter: Arc<AtomicU32>,
     fail_after: Option<u32>,
 }
-
-#[async_trait]
 impl Worker for TestWorker {
     type Error = std::io::Error;
 

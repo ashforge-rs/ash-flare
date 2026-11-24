@@ -13,125 +13,12 @@
 use ash_flare::{
     RestartIntensity, RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker,
 };
-use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::time::sleep;
 
 // Global request counter for demo purposes
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Debug)]
-enum ServiceWorker {
-    HttpGateway(HttpGateway),
-    WebSocketGateway(WebSocketGateway),
-    GraphQLGateway(GraphQLGateway),
-    AuthService(AuthService),
-    ProfileService(ProfileService),
-    NotificationService(NotificationService),
-    ContentIndexer(ContentIndexer),
-    MediaProcessor(MediaProcessor),
-    CdnSync(CdnSync),
-    PaymentProcessor(PaymentProcessor),
-    FraudDetector(FraudDetector),
-    EventCollector(EventCollector),
-    MetricsAggregator(MetricsAggregator),
-    PostgresConnector(PostgresConnector),
-    RedisConnector(RedisConnector),
-    MongoConnector(MongoConnector),
-    EmailWorker(EmailWorker),
-    ReportGenerator(ReportGenerator),
-    DataSyncWorker(DataSyncWorker),
-    HealthChecker(HealthChecker),
-    LogAggregator(LogAggregator),
-    AlertManager(AlertManager),
-}
-
-#[async_trait]
-impl Worker for ServiceWorker {
-    type Error = WorkerError;
-
-    async fn initialize(&mut self) -> Result<(), Self::Error> {
-        match self {
-            ServiceWorker::HttpGateway(w) => w.initialize().await,
-            ServiceWorker::WebSocketGateway(w) => w.initialize().await,
-            ServiceWorker::GraphQLGateway(w) => w.initialize().await,
-            ServiceWorker::AuthService(w) => w.initialize().await,
-            ServiceWorker::ProfileService(w) => w.initialize().await,
-            ServiceWorker::NotificationService(w) => w.initialize().await,
-            ServiceWorker::ContentIndexer(w) => w.initialize().await,
-            ServiceWorker::MediaProcessor(w) => w.initialize().await,
-            ServiceWorker::CdnSync(w) => w.initialize().await,
-            ServiceWorker::PaymentProcessor(w) => w.initialize().await,
-            ServiceWorker::FraudDetector(w) => w.initialize().await,
-            ServiceWorker::EventCollector(w) => w.initialize().await,
-            ServiceWorker::MetricsAggregator(w) => w.initialize().await,
-            ServiceWorker::PostgresConnector(w) => w.initialize().await,
-            ServiceWorker::RedisConnector(w) => w.initialize().await,
-            ServiceWorker::MongoConnector(w) => w.initialize().await,
-            ServiceWorker::EmailWorker(w) => w.initialize().await,
-            ServiceWorker::ReportGenerator(w) => w.initialize().await,
-            ServiceWorker::DataSyncWorker(w) => w.initialize().await,
-            ServiceWorker::HealthChecker(w) => w.initialize().await,
-            ServiceWorker::LogAggregator(w) => w.initialize().await,
-            ServiceWorker::AlertManager(w) => w.initialize().await,
-        }
-    }
-
-    async fn run(&mut self) -> Result<(), Self::Error> {
-        match self {
-            ServiceWorker::HttpGateway(w) => w.run().await,
-            ServiceWorker::WebSocketGateway(w) => w.run().await,
-            ServiceWorker::GraphQLGateway(w) => w.run().await,
-            ServiceWorker::AuthService(w) => w.run().await,
-            ServiceWorker::ProfileService(w) => w.run().await,
-            ServiceWorker::NotificationService(w) => w.run().await,
-            ServiceWorker::ContentIndexer(w) => w.run().await,
-            ServiceWorker::MediaProcessor(w) => w.run().await,
-            ServiceWorker::CdnSync(w) => w.run().await,
-            ServiceWorker::PaymentProcessor(w) => w.run().await,
-            ServiceWorker::FraudDetector(w) => w.run().await,
-            ServiceWorker::EventCollector(w) => w.run().await,
-            ServiceWorker::MetricsAggregator(w) => w.run().await,
-            ServiceWorker::PostgresConnector(w) => w.run().await,
-            ServiceWorker::RedisConnector(w) => w.run().await,
-            ServiceWorker::MongoConnector(w) => w.run().await,
-            ServiceWorker::EmailWorker(w) => w.run().await,
-            ServiceWorker::ReportGenerator(w) => w.run().await,
-            ServiceWorker::DataSyncWorker(w) => w.run().await,
-            ServiceWorker::HealthChecker(w) => w.run().await,
-            ServiceWorker::LogAggregator(w) => w.run().await,
-            ServiceWorker::AlertManager(w) => w.run().await,
-        }
-    }
-
-    async fn shutdown(&mut self) -> Result<(), Self::Error> {
-        match self {
-            ServiceWorker::HttpGateway(w) => w.shutdown().await,
-            ServiceWorker::WebSocketGateway(w) => w.shutdown().await,
-            ServiceWorker::GraphQLGateway(w) => w.shutdown().await,
-            ServiceWorker::AuthService(w) => w.shutdown().await,
-            ServiceWorker::ProfileService(w) => w.shutdown().await,
-            ServiceWorker::NotificationService(w) => w.shutdown().await,
-            ServiceWorker::ContentIndexer(w) => w.shutdown().await,
-            ServiceWorker::MediaProcessor(w) => w.shutdown().await,
-            ServiceWorker::CdnSync(w) => w.shutdown().await,
-            ServiceWorker::PaymentProcessor(w) => w.shutdown().await,
-            ServiceWorker::FraudDetector(w) => w.shutdown().await,
-            ServiceWorker::EventCollector(w) => w.shutdown().await,
-            ServiceWorker::MetricsAggregator(w) => w.shutdown().await,
-            ServiceWorker::PostgresConnector(w) => w.shutdown().await,
-            ServiceWorker::RedisConnector(w) => w.shutdown().await,
-            ServiceWorker::MongoConnector(w) => w.shutdown().await,
-            ServiceWorker::EmailWorker(w) => w.shutdown().await,
-            ServiceWorker::ReportGenerator(w) => w.shutdown().await,
-            ServiceWorker::DataSyncWorker(w) => w.shutdown().await,
-            ServiceWorker::HealthChecker(w) => w.shutdown().await,
-            ServiceWorker::LogAggregator(w) => w.shutdown().await,
-            ServiceWorker::AlertManager(w) => w.shutdown().await,
-        }
-    }
-}
 
 // ============================================================================
 // Worker Error Type
@@ -156,8 +43,6 @@ impl std::error::Error for WorkerError {}
 struct HttpGateway {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for HttpGateway {
     type Error = WorkerError;
 
@@ -186,8 +71,6 @@ impl Worker for HttpGateway {
 struct WebSocketGateway {
     connections: u32,
 }
-
-#[async_trait]
 impl Worker for WebSocketGateway {
     type Error = WorkerError;
 
@@ -213,8 +96,6 @@ impl Worker for WebSocketGateway {
 
 #[derive(Debug)]
 struct GraphQLGateway;
-
-#[async_trait]
 impl Worker for GraphQLGateway {
     type Error = WorkerError;
 
@@ -243,8 +124,6 @@ impl Worker for GraphQLGateway {
 struct AuthService {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for AuthService {
     type Error = WorkerError;
 
@@ -269,8 +148,6 @@ impl Worker for AuthService {
 struct ProfileService {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for ProfileService {
     type Error = WorkerError;
 
@@ -295,8 +172,6 @@ impl Worker for ProfileService {
 struct NotificationService {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for NotificationService {
     type Error = WorkerError;
 
@@ -325,8 +200,6 @@ impl Worker for NotificationService {
 struct ContentIndexer {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for ContentIndexer {
     type Error = WorkerError;
 
@@ -351,8 +224,6 @@ impl Worker for ContentIndexer {
 struct MediaProcessor {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for MediaProcessor {
     type Error = WorkerError;
 
@@ -377,8 +248,6 @@ impl Worker for MediaProcessor {
 struct CdnSync {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for CdnSync {
     type Error = WorkerError;
 
@@ -408,8 +277,6 @@ struct PaymentProcessor {
     id: u32,
     provider: &'static str,
 }
-
-#[async_trait]
 impl Worker for PaymentProcessor {
     type Error = WorkerError;
 
@@ -437,8 +304,6 @@ impl Worker for PaymentProcessor {
 struct FraudDetector {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for FraudDetector {
     type Error = WorkerError;
 
@@ -467,8 +332,6 @@ impl Worker for FraudDetector {
 struct EventCollector {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for EventCollector {
     type Error = WorkerError;
 
@@ -493,8 +356,6 @@ impl Worker for EventCollector {
 struct MetricsAggregator {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for MetricsAggregator {
     type Error = WorkerError;
 
@@ -524,8 +385,6 @@ struct PostgresConnector {
     id: u32,
     pool_size: u32,
 }
-
-#[async_trait]
 impl Worker for PostgresConnector {
     type Error = WorkerError;
 
@@ -553,8 +412,6 @@ impl Worker for PostgresConnector {
 struct RedisConnector {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for RedisConnector {
     type Error = WorkerError;
 
@@ -579,8 +436,6 @@ impl Worker for RedisConnector {
 struct MongoConnector {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for MongoConnector {
     type Error = WorkerError;
 
@@ -609,8 +464,6 @@ impl Worker for MongoConnector {
 struct EmailWorker {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for EmailWorker {
     type Error = WorkerError;
 
@@ -635,8 +488,6 @@ impl Worker for EmailWorker {
 struct ReportGenerator {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for ReportGenerator {
     type Error = WorkerError;
 
@@ -661,8 +512,6 @@ impl Worker for ReportGenerator {
 struct DataSyncWorker {
     id: u32,
 }
-
-#[async_trait]
 impl Worker for DataSyncWorker {
     type Error = WorkerError;
 
@@ -689,8 +538,6 @@ impl Worker for DataSyncWorker {
 
 #[derive(Debug)]
 struct HealthChecker;
-
-#[async_trait]
 impl Worker for HealthChecker {
     type Error = WorkerError;
 
@@ -714,8 +561,6 @@ impl Worker for HealthChecker {
 
 #[derive(Debug)]
 struct LogAggregator;
-
-#[async_trait]
 impl Worker for LogAggregator {
     type Error = WorkerError;
 
@@ -738,8 +583,6 @@ impl Worker for LogAggregator {
 
 #[derive(Debug)]
 struct AlertManager;
-
-#[async_trait]
 impl Worker for AlertManager {
     type Error = WorkerError;
 
@@ -765,12 +608,7 @@ impl Worker for AlertManager {
 // ============================================================================
 
 /// Recursively prints the supervision tree structure with visual formatting
-async fn print_tree(
-    handle: &SupervisorHandle<ServiceWorker>,
-    name: &str,
-    prefix: &str,
-    is_last: bool,
-) {
+async fn print_tree(handle: &SupervisorHandle, name: &str, prefix: &str, is_last: bool) {
     // Print current node
     let connector = if prefix.is_empty() {
         ""
@@ -924,57 +762,45 @@ async fn main() {
         .with_restart_intensity(RestartIntensity::new(5, 10))
         .with_worker(
             "http-gw-1",
-            || ServiceWorker::HttpGateway(HttpGateway { id: 1 }),
+            || HttpGateway { id: 1 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "http-gw-2",
-            || ServiceWorker::HttpGateway(HttpGateway { id: 2 }),
+            || HttpGateway { id: 2 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "http-gw-3",
-            || ServiceWorker::HttpGateway(HttpGateway { id: 3 }),
+            || HttpGateway { id: 3 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "websocket-gw",
-            || ServiceWorker::WebSocketGateway(WebSocketGateway { connections: 1000 }),
+            || WebSocketGateway { connections: 1000 },
             RestartPolicy::Permanent,
         )
-        .with_worker(
-            "graphql-gw",
-            || ServiceWorker::GraphQLGateway(GraphQLGateway),
-            RestartPolicy::Permanent,
-        );
+        .with_worker("graphql-gw", || GraphQLGateway, RestartPolicy::Permanent);
 
     // Build User Service Supervisor
     let user_service_spec = SupervisorSpec::new("user-service")
         .with_restart_strategy(RestartStrategy::OneForOne)
         .with_restart_intensity(RestartIntensity::new(3, 5))
-        .with_worker(
-            "auth-1",
-            || ServiceWorker::AuthService(AuthService { id: 1 }),
-            RestartPolicy::Permanent,
-        )
-        .with_worker(
-            "auth-2",
-            || ServiceWorker::AuthService(AuthService { id: 2 }),
-            RestartPolicy::Permanent,
-        )
+        .with_worker("auth-1", || AuthService { id: 1 }, RestartPolicy::Permanent)
+        .with_worker("auth-2", || AuthService { id: 2 }, RestartPolicy::Permanent)
         .with_worker(
             "profile-1",
-            || ServiceWorker::ProfileService(ProfileService { id: 1 }),
+            || ProfileService { id: 1 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "profile-2",
-            || ServiceWorker::ProfileService(ProfileService { id: 2 }),
+            || ProfileService { id: 2 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "notification-1",
-            || ServiceWorker::NotificationService(NotificationService { id: 1 }),
+            || NotificationService { id: 1 },
             RestartPolicy::Permanent,
         );
 
@@ -984,34 +810,26 @@ async fn main() {
         .with_restart_intensity(RestartIntensity::new(4, 8))
         .with_worker(
             "indexer-1",
-            || ServiceWorker::ContentIndexer(ContentIndexer { id: 1 }),
+            || ContentIndexer { id: 1 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "indexer-2",
-            || ServiceWorker::ContentIndexer(ContentIndexer { id: 2 }),
+            || ContentIndexer { id: 2 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "media-1",
-            || ServiceWorker::MediaProcessor(MediaProcessor { id: 1 }),
+            || MediaProcessor { id: 1 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "media-2",
-            || ServiceWorker::MediaProcessor(MediaProcessor { id: 2 }),
+            || MediaProcessor { id: 2 },
             RestartPolicy::Permanent,
         )
-        .with_worker(
-            "cdn-sync-1",
-            || ServiceWorker::CdnSync(CdnSync { id: 1 }),
-            RestartPolicy::Permanent,
-        )
-        .with_worker(
-            "cdn-sync-2",
-            || ServiceWorker::CdnSync(CdnSync { id: 2 }),
-            RestartPolicy::Permanent,
-        );
+        .with_worker("cdn-sync-1", || CdnSync { id: 1 }, RestartPolicy::Permanent)
+        .with_worker("cdn-sync-2", || CdnSync { id: 2 }, RestartPolicy::Permanent);
 
     // Build Payment Service Supervisor
     let payment_service_spec = SupervisorSpec::new("payment-service")
@@ -1019,32 +837,28 @@ async fn main() {
         .with_restart_intensity(RestartIntensity::new(2, 5))
         .with_worker(
             "payment-stripe",
-            || {
-                ServiceWorker::PaymentProcessor(PaymentProcessor {
-                    id: 1,
-                    provider: "stripe",
-                })
+            || PaymentProcessor {
+                id: 1,
+                provider: "stripe",
             },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "payment-paypal",
-            || {
-                ServiceWorker::PaymentProcessor(PaymentProcessor {
-                    id: 2,
-                    provider: "paypal",
-                })
+            || PaymentProcessor {
+                id: 2,
+                provider: "paypal",
             },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "fraud-1",
-            || ServiceWorker::FraudDetector(FraudDetector { id: 1 }),
+            || FraudDetector { id: 1 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "fraud-2",
-            || ServiceWorker::FraudDetector(FraudDetector { id: 2 }),
+            || FraudDetector { id: 2 },
             RestartPolicy::Permanent,
         );
 
@@ -1054,27 +868,27 @@ async fn main() {
         .with_restart_intensity(RestartIntensity::new(5, 10))
         .with_worker(
             "event-collector-1",
-            || ServiceWorker::EventCollector(EventCollector { id: 1 }),
+            || EventCollector { id: 1 },
             RestartPolicy::Transient,
         )
         .with_worker(
             "event-collector-2",
-            || ServiceWorker::EventCollector(EventCollector { id: 2 }),
+            || EventCollector { id: 2 },
             RestartPolicy::Transient,
         )
         .with_worker(
             "event-collector-3",
-            || ServiceWorker::EventCollector(EventCollector { id: 3 }),
+            || EventCollector { id: 3 },
             RestartPolicy::Transient,
         )
         .with_worker(
             "metrics-agg-1",
-            || ServiceWorker::MetricsAggregator(MetricsAggregator { id: 1 }),
+            || MetricsAggregator { id: 1 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "metrics-agg-2",
-            || ServiceWorker::MetricsAggregator(MetricsAggregator { id: 2 }),
+            || MetricsAggregator { id: 2 },
             RestartPolicy::Permanent,
         );
 
@@ -1084,31 +898,25 @@ async fn main() {
         .with_restart_intensity(RestartIntensity::new(3, 10))
         .with_worker(
             "postgres-master",
-            || {
-                ServiceWorker::PostgresConnector(PostgresConnector {
-                    id: 1,
-                    pool_size: 20,
-                })
+            || PostgresConnector {
+                id: 1,
+                pool_size: 20,
             },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "postgres-replica-1",
-            || {
-                ServiceWorker::PostgresConnector(PostgresConnector {
-                    id: 2,
-                    pool_size: 10,
-                })
+            || PostgresConnector {
+                id: 2,
+                pool_size: 10,
             },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "postgres-replica-2",
-            || {
-                ServiceWorker::PostgresConnector(PostgresConnector {
-                    id: 3,
-                    pool_size: 10,
-                })
+            || PostgresConnector {
+                id: 3,
+                pool_size: 10,
             },
             RestartPolicy::Permanent,
         );
@@ -1119,17 +927,17 @@ async fn main() {
         .with_restart_intensity(RestartIntensity::new(5, 10))
         .with_worker(
             "redis-cache-1",
-            || ServiceWorker::RedisConnector(RedisConnector { id: 1 }),
+            || RedisConnector { id: 1 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "redis-cache-2",
-            || ServiceWorker::RedisConnector(RedisConnector { id: 2 }),
+            || RedisConnector { id: 2 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "redis-cache-3",
-            || ServiceWorker::RedisConnector(RedisConnector { id: 3 }),
+            || RedisConnector { id: 3 },
             RestartPolicy::Permanent,
         );
 
@@ -1139,12 +947,12 @@ async fn main() {
         .with_restart_intensity(RestartIntensity::new(3, 10))
         .with_worker(
             "mongo-primary",
-            || ServiceWorker::MongoConnector(MongoConnector { id: 1 }),
+            || MongoConnector { id: 1 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "mongo-secondary",
-            || ServiceWorker::MongoConnector(MongoConnector { id: 2 }),
+            || MongoConnector { id: 2 },
             RestartPolicy::Permanent,
         );
 
@@ -1154,22 +962,22 @@ async fn main() {
         .with_restart_intensity(RestartIntensity::new(10, 20))
         .with_worker(
             "email-worker-1",
-            || ServiceWorker::EmailWorker(EmailWorker { id: 1 }),
+            || EmailWorker { id: 1 },
             RestartPolicy::Transient,
         )
         .with_worker(
             "email-worker-2",
-            || ServiceWorker::EmailWorker(EmailWorker { id: 2 }),
+            || EmailWorker { id: 2 },
             RestartPolicy::Transient,
         )
         .with_worker(
             "email-worker-3",
-            || ServiceWorker::EmailWorker(EmailWorker { id: 3 }),
+            || EmailWorker { id: 3 },
             RestartPolicy::Transient,
         )
         .with_worker(
             "email-worker-4",
-            || ServiceWorker::EmailWorker(EmailWorker { id: 4 }),
+            || EmailWorker { id: 4 },
             RestartPolicy::Transient,
         );
 
@@ -1179,22 +987,22 @@ async fn main() {
         .with_restart_intensity(RestartIntensity::new(5, 15))
         .with_worker(
             "report-1",
-            || ServiceWorker::ReportGenerator(ReportGenerator { id: 1 }),
+            || ReportGenerator { id: 1 },
             RestartPolicy::Transient,
         )
         .with_worker(
             "report-2",
-            || ServiceWorker::ReportGenerator(ReportGenerator { id: 2 }),
+            || ReportGenerator { id: 2 },
             RestartPolicy::Transient,
         )
         .with_worker(
             "sync-1",
-            || ServiceWorker::DataSyncWorker(DataSyncWorker { id: 1 }),
+            || DataSyncWorker { id: 1 },
             RestartPolicy::Permanent,
         )
         .with_worker(
             "sync-2",
-            || ServiceWorker::DataSyncWorker(DataSyncWorker { id: 2 }),
+            || DataSyncWorker { id: 2 },
             RestartPolicy::Permanent,
         );
 
@@ -1226,17 +1034,13 @@ async fn main() {
     // Build from deepest level upward
     let level_10 = SupervisorSpec::new("level-10")
         .with_restart_strategy(RestartStrategy::OneForOne)
-        .with_worker(
-            "worker-10-1",
-            || ServiceWorker::LogAggregator(LogAggregator),
-            RestartPolicy::Permanent,
-        );
+        .with_worker("worker-10-1", || LogAggregator, RestartPolicy::Permanent);
 
     let level_9 = SupervisorSpec::new("level-9")
         .with_restart_strategy(RestartStrategy::OneForOne)
         .with_worker(
             "worker-9-1",
-            || ServiceWorker::MetricsAggregator(MetricsAggregator { id: 9 }),
+            || MetricsAggregator { id: 9 },
             RestartPolicy::Permanent,
         )
         .with_supervisor(level_10);
@@ -1245,7 +1049,7 @@ async fn main() {
         .with_restart_strategy(RestartStrategy::OneForOne)
         .with_worker(
             "worker-8-1",
-            || ServiceWorker::EventCollector(EventCollector { id: 8 }),
+            || EventCollector { id: 8 },
             RestartPolicy::Permanent,
         )
         .with_supervisor(level_9);
@@ -1254,7 +1058,7 @@ async fn main() {
         .with_restart_strategy(RestartStrategy::OneForOne)
         .with_worker(
             "worker-7-1",
-            || ServiceWorker::DataSyncWorker(DataSyncWorker { id: 7 }),
+            || DataSyncWorker { id: 7 },
             RestartPolicy::Permanent,
         )
         .with_supervisor(level_8);
@@ -1263,7 +1067,7 @@ async fn main() {
         .with_restart_strategy(RestartStrategy::OneForOne)
         .with_worker(
             "worker-6-1",
-            || ServiceWorker::EmailWorker(EmailWorker { id: 6 }),
+            || EmailWorker { id: 6 },
             RestartPolicy::Permanent,
         )
         .with_supervisor(level_7);
@@ -1272,7 +1076,7 @@ async fn main() {
         .with_restart_strategy(RestartStrategy::OneForOne)
         .with_worker(
             "worker-5-1",
-            || ServiceWorker::RedisConnector(RedisConnector { id: 5 }),
+            || RedisConnector { id: 5 },
             RestartPolicy::Permanent,
         )
         .with_supervisor(level_6);
@@ -1281,11 +1085,9 @@ async fn main() {
         .with_restart_strategy(RestartStrategy::OneForOne)
         .with_worker(
             "worker-4-1",
-            || {
-                ServiceWorker::PostgresConnector(PostgresConnector {
-                    id: 4,
-                    pool_size: 5,
-                })
+            || PostgresConnector {
+                id: 4,
+                pool_size: 5,
             },
             RestartPolicy::Permanent,
         )
@@ -1293,18 +1095,14 @@ async fn main() {
 
     let level_3 = SupervisorSpec::new("level-3")
         .with_restart_strategy(RestartStrategy::OneForOne)
-        .with_worker(
-            "worker-3-1",
-            || ServiceWorker::CdnSync(CdnSync { id: 3 }),
-            RestartPolicy::Permanent,
-        )
+        .with_worker("worker-3-1", || CdnSync { id: 3 }, RestartPolicy::Permanent)
         .with_supervisor(level_4);
 
     let level_2 = SupervisorSpec::new("level-2")
         .with_restart_strategy(RestartStrategy::OneForOne)
         .with_worker(
             "worker-2-1",
-            || ServiceWorker::MediaProcessor(MediaProcessor { id: 2 }),
+            || MediaProcessor { id: 2 },
             RestartPolicy::Permanent,
         )
         .with_supervisor(level_3);
@@ -1313,7 +1111,7 @@ async fn main() {
         .with_restart_strategy(RestartStrategy::OneForOne)
         .with_worker(
             "worker-1-1",
-            || ServiceWorker::AuthService(AuthService { id: 1 }),
+            || AuthService { id: 1 },
             RestartPolicy::Permanent,
         )
         .with_supervisor(level_2);
@@ -1344,21 +1142,9 @@ async fn main() {
         // Deep Nesting Demo (10 levels)
         .with_supervisor(deep_tree_root)
         // Monitoring Layer (direct workers)
-        .with_worker(
-            "health-checker",
-            || ServiceWorker::HealthChecker(HealthChecker),
-            RestartPolicy::Permanent,
-        )
-        .with_worker(
-            "log-aggregator",
-            || ServiceWorker::LogAggregator(LogAggregator),
-            RestartPolicy::Permanent,
-        )
-        .with_worker(
-            "alert-manager",
-            || ServiceWorker::AlertManager(AlertManager),
-            RestartPolicy::Permanent,
-        );
+        .with_worker("health-checker", || HealthChecker, RestartPolicy::Permanent)
+        .with_worker("log-aggregator", || LogAggregator, RestartPolicy::Permanent)
+        .with_worker("alert-manager", || AlertManager, RestartPolicy::Permanent);
 
     println!("\n🚀 Starting supervision tree...\n");
     let handle = SupervisorHandle::start(root_spec);
@@ -1376,7 +1162,7 @@ async fn main() {
         println!("  Restart Strategy: {:?}", strategy);
     }
     if let Ok(uptime) = handle.uptime().await {
-        println!("  Uptime: {} seconds", uptime);
+        println!("  Uptime: {} seconds", uptime.as_secs());
     }
 
     let total_requests = REQUEST_COUNTER.load(Ordering::Relaxed);

@@ -5,6 +5,7 @@ A Rust supervision framework inspired by Erlang/OTP, with Python bindings.
 ## Features
 
 - Process supervision trees with automatic restart
+- Workers of different types mixed freely in one tree
 - Configurable restart policies (Permanent, Temporary, Transient)
 - Supervision strategies (OneForOne, OneForAll, RestForOne)
 - Exponential restart backoff, so a crash-looping child cannot peg a CPU core
@@ -44,12 +45,10 @@ uv add "ash-flare @ https://github.com/ashforge-rs/ash-flare/releases/download/v
 
 ```rust
 use ash_flare::{RestartPolicy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use std::time::Duration;
 
 struct MyWorker;
 
-#[async_trait]
 impl Worker for MyWorker {
     type Error = std::io::Error;
 
@@ -76,13 +75,55 @@ handle.start_child_linked(
     Duration::from_secs(5),
 ).await?;
 
+// Returns once every worker has stopped and run its cleanup hook.
 handle.shutdown().await?;
 # Ok(())
 # }
 ```
 
 Workers are created by a factory closure so the supervisor can build a fresh
-instance on every restart.
+instance on every restart. `Worker` is implemented with plain `async fn`s, and
+`Error` only needs to implement `Display`, so `anyhow::Error` or `String` work.
+
+Different worker types can share one tree, and state is shared by capturing a
+clone of a `WorkerContext` (or anything else cheap to clone) in each factory:
+
+```rust
+use ash_flare::{RestartPolicy, SupervisorHandle, SupervisorSpec, Worker, WorkerContext};
+
+struct Ingest { ctx: WorkerContext }
+struct Report { ctx: WorkerContext }
+
+impl Worker for Ingest {
+    type Error = String;
+    async fn run(&mut self) -> Result<(), Self::Error> {
+        self.ctx.set("rows", serde_json::json!(42));
+        Ok(())
+    }
+}
+
+impl Worker for Report {
+    type Error = std::io::Error;
+    async fn run(&mut self) -> Result<(), Self::Error> {
+        println!("rows so far: {:?}", self.ctx.get("rows"));
+        Ok(())
+    }
+}
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let ctx = WorkerContext::new();
+let (a, b) = (ctx.clone(), ctx.clone());
+
+let spec = SupervisorSpec::new("pipeline")
+    .with_worker("ingest", move || Ingest { ctx: a.clone() }, RestartPolicy::Transient)
+    .with_worker("report", move || Report { ctx: b.clone() }, RestartPolicy::Transient);
+
+let handle = SupervisorHandle::start(spec);
+handle.shutdown().await?;
+# Ok(())
+# }
+```
 
 ### Python
 
@@ -154,18 +195,17 @@ use separate processes or move the hot loop into Rust.
 ## Graceful shutdown
 
 When a worker is terminated the supervisor asks it to stop before forcing it
-down. A worker that takes a `ShutdownSignal` can wind down on its own terms:
+down. A worker whose factory takes a `ShutdownSignal` argument can wind down
+on its own terms:
 
 ```rust
 use ash_flare::{RestartPolicy, ShutdownSignal, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use std::time::Duration;
 
 struct Pump {
     shutdown: ShutdownSignal,
 }
 
-#[async_trait]
 impl Worker for Pump {
     type Error = std::io::Error;
 
@@ -190,7 +230,7 @@ impl Worker for Pump {
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 let spec = SupervisorSpec::new("root")
     .with_shutdown_timeout(Duration::from_secs(5))
-    .with_worker_signal("pump", |signal| Pump { shutdown: signal }, RestartPolicy::Permanent);
+    .with_worker("pump", |signal| Pump { shutdown: signal }, RestartPolicy::Permanent);
 
 let handle = SupervisorHandle::start(spec);
 handle.shutdown().await?;
@@ -202,6 +242,34 @@ handle.shutdown().await?;
 cancelled. A worker that cannot be cancelled within the shutdown timeout (for
 example one that blocks the thread without awaiting) is aborted instead, and
 does not get the hook.
+
+## Migrating from 3.x
+
+- Remove `#[async_trait]` from `impl Worker` blocks and drop the `async-trait`
+  dependency; the trait methods are written as plain `async fn`.
+- `SupervisorSpec`, `SupervisorHandle` and `distributed::SupervisorServer` are no
+  longer generic. Delete the `<W>` and any enum that only existed to put several
+  worker types in one tree.
+- `StatefulSupervisorSpec` / `StatefulSupervisorHandle` and the
+  `stateful_supervision_tree!` macro are gone. Use `SupervisorSpec` and capture a
+  `WorkerContext` clone in each factory; the factory gets `WorkerContext` rather
+  than `Arc<WorkerContext>`.
+- `with_worker_signal`, `start_child_with_signal` and
+  `start_child_linked_with_signal` are gone: pass a `|signal| ...` factory to
+  `with_worker`, `start_child` or `start_child_linked`.
+- `SupervisorHandle::shutdown` now waits until the tree has stopped.
+- `SupervisorHandle::uptime` returns a `Duration`.
+- `ChildInfo::restart_policy` is `None` for nested supervisors, as documented.
+- `SupervisorError` is `#[non_exhaustive]`, and its never-used `NoChildren` and
+  `AllChildrenFailed` variants are removed. `WorkerError` is removed.
+- `distributed::ChildInfo` is replaced by the crate-root `ChildInfo`, and
+  `SupervisorStatus::restart_strategy` is a `RestartStrategy`.
+- `RemoteSupervisorHandle::connect_tcp` / `connect_unix` (async, fallible, but
+  never connecting) are replaced by the plain constructors `tcp` / `unix`.
+
+The Python API is unchanged, except that `SupervisorHandle.shutdown()` (and the
+stateful variant) now blocks until the tree has stopped. A worker that never
+checks `should_stop` keeps it waiting for the full shutdown timeout.
 
 ## Documentation
 

@@ -10,7 +10,6 @@ use ash_flare::{
     Mailbox, RestartPolicy, SupervisorHandle, SupervisorSpec, Worker,
     mailbox::{MailboxConfig, mailbox},
 };
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -54,8 +53,6 @@ impl PoolWorker {
         Ok(())
     }
 }
-
-#[async_trait]
 impl Worker for PoolWorker {
     type Error = WorkerError;
 

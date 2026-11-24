@@ -10,7 +10,6 @@
 //! - Monitors can be added/removed dynamically as services come and go
 
 use ash_flare::{RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -57,8 +56,6 @@ impl ServiceMonitor {
         }
     }
 }
-
-#[async_trait]
 impl Worker for ServiceMonitor {
     type Error = MonitorError;
 
@@ -120,8 +117,6 @@ impl MetricsAggregator {
         }
     }
 }
-
-#[async_trait]
 impl Worker for MetricsAggregator {
     type Error = MonitorError;
 
@@ -157,8 +152,6 @@ impl AlertManager {
         }
     }
 }
-
-#[async_trait]
 impl Worker for AlertManager {
     type Error = MonitorError;
 
@@ -180,42 +173,6 @@ impl Worker for AlertManager {
     }
 }
 
-/// Common worker type that can be any of our worker types
-enum MonitoringWorker {
-    ServiceMonitor(ServiceMonitor),
-    Metrics(MetricsAggregator),
-    Alerts(AlertManager),
-}
-
-#[async_trait]
-impl Worker for MonitoringWorker {
-    type Error = MonitorError;
-
-    async fn initialize(&mut self) -> Result<(), Self::Error> {
-        match self {
-            MonitoringWorker::ServiceMonitor(w) => w.initialize().await,
-            MonitoringWorker::Metrics(w) => w.initialize().await,
-            MonitoringWorker::Alerts(w) => w.initialize().await,
-        }
-    }
-
-    async fn run(&mut self) -> Result<(), Self::Error> {
-        match self {
-            MonitoringWorker::ServiceMonitor(w) => w.run().await,
-            MonitoringWorker::Metrics(w) => w.run().await,
-            MonitoringWorker::Alerts(w) => w.run().await,
-        }
-    }
-
-    async fn shutdown(&mut self) -> Result<(), Self::Error> {
-        match self {
-            MonitoringWorker::ServiceMonitor(w) => w.shutdown().await,
-            MonitoringWorker::Metrics(w) => w.shutdown().await,
-            MonitoringWorker::Alerts(w) => w.shutdown().await,
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() {
     println!("🚀 Starting HTTP Service Monitoring System\n");
@@ -226,44 +183,25 @@ async fn main() {
         .with_restart_strategy(RestartStrategy::OneForOne)
         .with_worker(
             "api_gateway",
-            || {
-                MonitoringWorker::ServiceMonitor(ServiceMonitor::new(
-                    "API Gateway",
-                    "https://api.example.com/health",
-                ))
-            },
+            || ServiceMonitor::new("API Gateway", "https://api.example.com/health"),
             RestartPolicy::Permanent,
         )
         .with_worker(
             "auth_service",
-            || {
-                MonitoringWorker::ServiceMonitor(ServiceMonitor::new(
-                    "Auth Service",
-                    "https://auth.example.com/health",
-                ))
-            },
+            || ServiceMonitor::new("Auth Service", "https://auth.example.com/health"),
             RestartPolicy::Permanent,
         )
         .with_worker(
             "payment_service",
-            || {
-                MonitoringWorker::ServiceMonitor(ServiceMonitor::new(
-                    "Payment Service",
-                    "https://pay.example.com/health",
-                ))
-            },
+            || ServiceMonitor::new("Payment Service", "https://pay.example.com/health"),
             RestartPolicy::Permanent,
         )
         .with_worker(
             "metrics",
-            || MonitoringWorker::Metrics(MetricsAggregator::new()),
+            || MetricsAggregator::new(),
             RestartPolicy::Permanent,
         )
-        .with_worker(
-            "alerts",
-            || MonitoringWorker::Alerts(AlertManager::new()),
-            RestartPolicy::Permanent,
-        );
+        .with_worker("alerts", || AlertManager::new(), RestartPolicy::Permanent);
 
     let supervisor = SupervisorHandle::start(spec);
 
@@ -276,12 +214,7 @@ async fn main() {
     let _ = supervisor
         .start_child(
             "cdn_service",
-            || {
-                MonitoringWorker::ServiceMonitor(ServiceMonitor::new(
-                    "CDN Service",
-                    "https://cdn.example.com/health",
-                ))
-            },
+            || ServiceMonitor::new("CDN Service", "https://cdn.example.com/health"),
             RestartPolicy::Permanent,
         )
         .await;

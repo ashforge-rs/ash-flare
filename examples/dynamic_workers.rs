@@ -1,7 +1,6 @@
 //! Elastic worker pool example - scaling workers dynamically based on workload
 
-use ash_flare::{RestartPolicy, SupervisorHandle, Worker, impl_worker_stateful, supervision_tree};
-use async_trait::async_trait;
+use ash_flare::{RestartPolicy, SupervisorHandle, impl_worker_stateful, supervision_tree};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -53,44 +52,12 @@ impl_worker_stateful! {
 }
 
 #[derive(Clone)]
-enum DynamicWorker {
-    Task(TaskWorker),
-    Monitor(WorkloadMonitorWrapper),
-}
-
-#[async_trait]
-impl Worker for DynamicWorker {
-    type Error = WorkerError;
-
-    async fn initialize(&mut self) -> Result<(), Self::Error> {
-        match self {
-            DynamicWorker::Task(w) => w.initialize().await,
-            DynamicWorker::Monitor(w) => w.initialize().await,
-        }
-    }
-
-    async fn run(&mut self) -> Result<(), Self::Error> {
-        match self {
-            DynamicWorker::Task(w) => w.run().await,
-            DynamicWorker::Monitor(w) => w.run().await,
-        }
-    }
-
-    async fn shutdown(&mut self) -> Result<(), Self::Error> {
-        match self {
-            DynamicWorker::Task(w) => w.shutdown().await,
-            DynamicWorker::Monitor(w) => w.shutdown().await,
-        }
-    }
-}
-
-#[derive(Clone)]
 struct WorkloadMonitorWrapper {
-    supervisor: SupervisorHandle<DynamicWorker>,
+    supervisor: SupervisorHandle,
 }
 
 impl WorkloadMonitorWrapper {
-    fn new(supervisor: SupervisorHandle<DynamicWorker>) -> Self {
+    fn new(supervisor: SupervisorHandle) -> Self {
         Self { supervisor }
     }
 
@@ -113,7 +80,7 @@ impl WorkloadMonitorWrapper {
         self.supervisor
             .start_child(
                 format!("dynamic-worker-{}", worker_id),
-                move || DynamicWorker::Task(TaskWorker::new(worker_id, task_type_owned.clone())),
+                move || TaskWorker::new(worker_id, task_type_owned.clone()),
                 RestartPolicy::Transient,
             )
             .await
@@ -182,14 +149,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         supervisors: []
     };
 
-    let supervisor: SupervisorHandle<DynamicWorker> = SupervisorHandle::start(spec);
+    let supervisor: SupervisorHandle = SupervisorHandle::start(spec);
     println!("Started elastic worker pool\n");
 
     let sup_clone = supervisor.clone();
     supervisor
         .start_child(
             "pool-manager",
-            move || DynamicWorker::Monitor(WorkloadMonitorWrapper::new(sup_clone.clone())),
+            move || WorkloadMonitorWrapper::new(sup_clone.clone()),
             RestartPolicy::Permanent,
         )
         .await?;

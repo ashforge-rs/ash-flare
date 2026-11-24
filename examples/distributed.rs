@@ -11,7 +11,6 @@ use ash_flare::distributed::{RemoteSupervisorHandle, SupervisorAddress, Supervis
 use ash_flare::{RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker};
 
 #[cfg(unix)]
-use async_trait::async_trait;
 #[cfg(unix)]
 use std::time::Duration;
 #[cfg(unix)]
@@ -44,7 +43,6 @@ impl Counter {
 }
 
 #[cfg(unix)]
-#[async_trait]
 impl Worker for Counter {
     type Error = WorkerError;
 
@@ -109,7 +107,7 @@ async fn run_client(socket_path: String) {
         Ok(status) => {
             println!("   Name: {}", status.name);
             println!("   Children: {}", status.children_count);
-            println!("   Strategy: {}", status.restart_strategy);
+            println!("   Strategy: {:?}", status.restart_strategy);
             println!("   Uptime: {}s", status.uptime_secs);
         }
         Err(e) => eprintln!("   Error: {}", e),

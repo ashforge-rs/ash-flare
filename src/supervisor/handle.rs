@@ -3,33 +3,28 @@
 use super::error::SupervisorError;
 use super::runtime::{SupervisorCommand, SupervisorRuntime};
 use super::spec::SupervisorSpec;
-use crate::restart::RestartPolicy;
+use crate::restart::{RestartPolicy, RestartStrategy};
 use crate::types::{ChildId, ChildInfo};
-use crate::worker::{Worker, WorkerSpec};
+use crate::worker::{WorkerFactory, WorkerSpec};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 /// Handle used to interact with a running supervisor tree.
-pub struct SupervisorHandle<W: Worker> {
+///
+/// Cloning a handle is cheap; every clone talks to the same supervisor.
+#[derive(Clone)]
+pub struct SupervisorHandle {
     pub(crate) name: Arc<String>,
-    pub(crate) control_tx: mpsc::UnboundedSender<SupervisorCommand<W>>,
+    pub(crate) control_tx: mpsc::UnboundedSender<SupervisorCommand>,
 }
 
-// Hand-written so cloning a handle does not require the worker itself to be
-// `Clone`; a handle is just a name and a channel.
-impl<W: Worker> Clone for SupervisorHandle<W> {
-    fn clone(&self) -> Self {
-        Self {
-            name: Arc::clone(&self.name),
-            control_tx: self.control_tx.clone(),
-        }
-    }
-}
-
-impl<W: Worker> SupervisorHandle<W> {
+impl SupervisorHandle {
     /// Spawns a supervisor tree based on the provided specification.
+    ///
+    /// Must be called from within a tokio runtime.
     #[must_use]
-    pub fn start(spec: SupervisorSpec<W>) -> Self {
+    pub fn start(spec: SupervisorSpec) -> Self {
         Self::start_inner(spec, None)
     }
 
@@ -39,15 +34,15 @@ impl<W: Worker> SupervisorHandle<W> {
     /// Without this a nested supervisor that escalates simply stops: the parent
     /// never learns, and keeps a dead handle in its children list forever.
     pub(crate) fn start_supervised(
-        spec: SupervisorSpec<W>,
-        parent_tx: mpsc::UnboundedSender<SupervisorCommand<W>>,
+        spec: SupervisorSpec,
+        parent_tx: mpsc::UnboundedSender<SupervisorCommand>,
     ) -> Self {
         Self::start_inner(spec, Some(parent_tx))
     }
 
     fn start_inner(
-        spec: SupervisorSpec<W>,
-        parent_tx: Option<mpsc::UnboundedSender<SupervisorCommand<W>>>,
+        spec: SupervisorSpec,
+        parent_tx: Option<mpsc::UnboundedSender<SupervisorCommand>>,
     ) -> Self {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let name_arc = Arc::new(spec.name.clone());
@@ -74,60 +69,47 @@ impl<W: Worker> SupervisorHandle<W> {
         }
     }
 
-    /// Dynamically starts a new child worker
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the supervisor is shutting down or a child with this ID already exists.
-    pub async fn start_child(
+    /// Sends a command built around a reply channel and waits for the reply.
+    async fn request<T>(
         &self,
-        id: impl Into<String>,
-        factory: impl Fn() -> W + Send + Sync + 'static,
-        restart_policy: RestartPolicy,
-    ) -> Result<ChildId, SupervisorError> {
-        self.start_child_with_signal(id, move |_signal| factory(), restart_policy)
-            .await
+        command: impl FnOnce(oneshot::Sender<T>) -> SupervisorCommand,
+    ) -> Result<T, SupervisorError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.control_tx
+            .send(command(reply_tx))
+            .map_err(|_| self.shutting_down())?;
+        reply_rx.await.map_err(|_| self.shutting_down())
     }
 
-    /// Dynamically starts a child whose factory receives the worker's
-    /// [`ShutdownSignal`](crate::ShutdownSignal), so it can observe cooperative
-    /// termination.
+    fn shutting_down(&self) -> SupervisorError {
+        SupervisorError::ShuttingDown(self.name().to_owned())
+    }
+
+    /// Dynamically starts a new child worker.
+    ///
+    /// The factory may take no arguments or the worker's
+    /// [`ShutdownSignal`](crate::ShutdownSignal), as with
+    /// [`SupervisorSpec::with_worker`].
     ///
     /// # Errors
     ///
     /// Returns an error if the supervisor is shutting down or a child with this ID already exists.
-    pub async fn start_child_with_signal(
+    pub async fn start_child<M>(
         &self,
         id: impl Into<String>,
-        factory: impl Fn(crate::ShutdownSignal) -> W + Send + Sync + 'static,
+        factory: impl WorkerFactory<M>,
         restart_policy: RestartPolicy,
     ) -> Result<ChildId, SupervisorError> {
-        let (result_tx, result_rx) = oneshot::channel();
-        let spec = WorkerSpec::with_signal(id, factory, restart_policy);
-
-        self.control_tx
-            .send(SupervisorCommand::StartChild {
-                spec,
-                respond_to: result_tx,
-            })
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
-
-        result_rx
-            .await
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?
+        let spec = WorkerSpec::new(id, factory, restart_policy);
+        self.request(|respond_to| SupervisorCommand::StartChild { spec, respond_to })
+            .await?
     }
 
     /// Dynamically starts a new child worker with linked initialization.
     ///
-    /// This method waits for the worker's initialization to complete before returning.
-    /// If initialization fails or times out, an error is returned and the worker is not added.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - Unique identifier for the child
-    /// * `factory` - Factory function to create the worker
-    /// * `restart_policy` - How to handle worker termination after it starts running
-    /// * `timeout` - Maximum time to wait for initialization
+    /// This method waits for the worker's [`initialize`](crate::Worker::initialize)
+    /// to complete before returning. If initialization fails or times out, an
+    /// error is returned and the worker is not added.
     ///
     /// # Errors
     ///
@@ -140,45 +122,20 @@ impl<W: Worker> SupervisorHandle<W> {
     ///
     /// Initialization failures do NOT trigger restart policies. The worker must successfully
     /// initialize before restart policies take effect.
-    pub async fn start_child_linked(
+    pub async fn start_child_linked<M>(
         &self,
         id: impl Into<String>,
-        factory: impl Fn() -> W + Send + Sync + 'static,
+        factory: impl WorkerFactory<M>,
         restart_policy: RestartPolicy,
-        timeout: std::time::Duration,
+        timeout: Duration,
     ) -> Result<ChildId, SupervisorError> {
-        self.start_child_linked_with_signal(id, move |_signal| factory(), restart_policy, timeout)
-            .await
-    }
-
-    /// Like [`SupervisorHandle::start_child_linked`], but the factory receives
-    /// the worker's [`ShutdownSignal`](crate::ShutdownSignal) so the worker can
-    /// observe cooperative termination.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`SupervisorHandle::start_child_linked`].
-    pub async fn start_child_linked_with_signal(
-        &self,
-        id: impl Into<String>,
-        factory: impl Fn(crate::ShutdownSignal) -> W + Send + Sync + 'static,
-        restart_policy: RestartPolicy,
-        timeout: std::time::Duration,
-    ) -> Result<ChildId, SupervisorError> {
-        let (result_tx, result_rx) = oneshot::channel();
-        let spec = WorkerSpec::with_signal(id, factory, restart_policy);
-
-        self.control_tx
-            .send(SupervisorCommand::StartChildLinked {
-                spec,
-                timeout,
-                respond_to: result_tx,
-            })
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
-
-        result_rx
-            .await
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?
+        let spec = WorkerSpec::new(id, factory, restart_policy);
+        self.request(|respond_to| SupervisorCommand::StartChildLinked {
+            spec,
+            timeout,
+            respond_to,
+        })
+        .await?
     }
 
     /// Dynamically terminates a child
@@ -187,18 +144,11 @@ impl<W: Worker> SupervisorHandle<W> {
     ///
     /// Returns an error if the child is not found or the supervisor is shutting down.
     pub async fn terminate_child(&self, id: &str) -> Result<(), SupervisorError> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        self.control_tx
-            .send(SupervisorCommand::TerminateChild {
-                id: id.to_owned(),
-                respond_to: result_tx,
-            })
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
-
-        result_rx
-            .await
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?
+        self.request(|respond_to| SupervisorCommand::TerminateChild {
+            id: id.to_owned(),
+            respond_to,
+        })
+        .await?
     }
 
     /// Returns information about all children
@@ -207,29 +157,31 @@ impl<W: Worker> SupervisorHandle<W> {
     ///
     /// Returns an error if the supervisor is shutting down.
     pub async fn which_children(&self) -> Result<Vec<ChildInfo>, SupervisorError> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        self.control_tx
-            .send(SupervisorCommand::WhichChildren {
-                respond_to: result_tx,
-            })
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
-
-        result_rx
+        self.request(|respond_to| SupervisorCommand::WhichChildren { respond_to })
             .await
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?
     }
 
-    /// Requests a graceful shutdown of the supervisor tree.
+    /// Shuts the supervisor tree down and waits until it has stopped.
+    ///
+    /// Each child in turn is asked to stop and given the supervisor's shutdown
+    /// timeout to do so; nested supervisors are shut down the same way. When this returns, all `shutdown` hooks that were going to
+    /// run have run.
     ///
     /// # Errors
     ///
-    /// Returns an error if the supervisor channel is already closed.
-    #[allow(clippy::unused_async)]
+    /// Returns [`SupervisorError::ShuttingDown`] if the supervisor had already
+    /// stopped.
     pub async fn shutdown(&self) -> Result<(), SupervisorError> {
+        let (done_tx, done_rx) = oneshot::channel();
         self.control_tx
-            .send(SupervisorCommand::Shutdown)
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
+            .send(SupervisorCommand::Shutdown {
+                respond_to: Some(done_tx),
+            })
+            .map_err(|_| self.shutting_down())?;
+
+        // A dropped reply means the supervisor stopped on its own (it escalated)
+        // while this request was queued; it shut its children down on the way.
+        let _done = done_rx.await;
         Ok(())
     }
 
@@ -239,43 +191,38 @@ impl<W: Worker> SupervisorHandle<W> {
         self.name.as_str()
     }
 
+    /// Returns `true` once the supervisor has stopped and no longer accepts
+    /// commands.
+    #[must_use]
+    pub fn is_stopped(&self) -> bool {
+        self.control_tx.is_closed()
+    }
+
     /// Returns the supervisor's restart strategy.
     ///
     /// # Errors
     ///
     /// Returns an error if the supervisor is shutting down.
-    pub async fn restart_strategy(
-        &self,
-    ) -> Result<crate::restart::RestartStrategy, SupervisorError> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        self.control_tx
-            .send(SupervisorCommand::GetRestartStrategy {
-                respond_to: result_tx,
-            })
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
-
-        result_rx
+    pub async fn restart_strategy(&self) -> Result<RestartStrategy, SupervisorError> {
+        self.request(|respond_to| SupervisorCommand::GetRestartStrategy { respond_to })
             .await
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))
     }
 
-    /// Returns the supervisor's uptime in seconds.
+    /// Returns how long the supervisor has been running.
     ///
     /// # Errors
     ///
     /// Returns an error if the supervisor is shutting down.
-    pub async fn uptime(&self) -> Result<u64, SupervisorError> {
-        let (result_tx, result_rx) = oneshot::channel();
-
-        self.control_tx
-            .send(SupervisorCommand::GetUptime {
-                respond_to: result_tx,
-            })
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))?;
-
-        result_rx
+    pub async fn uptime(&self) -> Result<Duration, SupervisorError> {
+        self.request(|respond_to| SupervisorCommand::GetUptime { respond_to })
             .await
-            .map_err(|_| SupervisorError::ShuttingDown(self.name().to_owned()))
+    }
+}
+
+impl std::fmt::Debug for SupervisorHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SupervisorHandle")
+            .field("name", &self.name())
+            .finish_non_exhaustive()
     }
 }

@@ -3,7 +3,6 @@
 use ash_flare::{
     ChildType, RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker,
 };
-use async_trait::async_trait;
 use std::time::Duration;
 use tokio::time::{interval, sleep};
 
@@ -33,8 +32,6 @@ impl SimpleWorker {
         }
     }
 }
-
-#[async_trait]
 impl Worker for SimpleWorker {
     type Error = WorkerError;
 
@@ -54,7 +51,7 @@ impl Worker for SimpleWorker {
     }
 }
 
-async fn render_supervisor_tree(root: &SupervisorHandle<SimpleWorker>) {
+async fn render_supervisor_tree(root: &SupervisorHandle) {
     // Clear screen
     print!("\x1B[2J\x1B[1;1H");
 

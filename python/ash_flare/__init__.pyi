@@ -190,7 +190,13 @@ class SupervisorHandle:
         """Start a child and wait for it to initialize."""
 
     def terminate_child(self, child_id: str) -> None: ...
-    def shutdown(self) -> None: ...
+    def shutdown(self) -> None:
+        """Stop the tree and block until every worker has stopped.
+
+        Each worker gets the spec's shutdown timeout; one that ignores
+        ``should_stop`` is abandoned only once that timeout has elapsed.
+        """
+        ...
 
 class StatefulSupervisorSpec:
     """Describes a supervision tree whose workers share a ``WorkerContext``."""
@@ -221,7 +227,13 @@ class StatefulSupervisorHandle:
     def which_children(self) -> List[ChildInfo]: ...
     def count_children(self) -> Dict[str, int]: ...
     def terminate_child(self, child_id: str) -> None: ...
-    def shutdown(self) -> None: ...
+    def shutdown(self) -> None:
+        """Stop the tree and block until every worker has stopped.
+
+        Each worker gets the spec's shutdown timeout; one that ignores
+        ``should_stop`` is abandoned only once that timeout has elapsed.
+        """
+        ...
 
 class SupervisorAddress:
     """Address of a remote supervisor."""

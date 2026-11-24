@@ -10,5 +10,4 @@ pub use error::SupervisorError;
 pub use handle::SupervisorHandle;
 pub use spec::SupervisorSpec;
 
-pub(crate) use runtime::RuntimeControl;
-pub(crate) use spec::DEFAULT_SHUTDOWN_TIMEOUT;
+pub(crate) use runtime::SupervisorCommand;

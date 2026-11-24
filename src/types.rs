@@ -33,14 +33,20 @@ pub enum ChildExitReason {
 /// Child identifier type
 pub type ChildId = String;
 
-/// Information about a child process
-#[derive(Debug, Clone)]
+/// Information about a supervised child, as returned by
+/// [`SupervisorHandle::which_children`](crate::SupervisorHandle::which_children)
+/// and sent over the wire by the [distributed](crate::distributed) protocol.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+#[rkyv(derive(Debug))]
 pub struct ChildInfo {
     /// Unique identifier for the child
     pub id: ChildId,
     /// Type of child (Worker or Supervisor)
     pub child_type: ChildType,
-    /// Restart policy for the child (None for supervisors)
+    /// Restart policy for the child; `None` for nested supervisors, which are
+    /// always restarted as if permanent.
     pub restart_policy: Option<RestartPolicy>,
 }
 
@@ -68,7 +74,8 @@ pub enum ChildType {
 /// Cooperative shutdown signal handed to a worker.
 ///
 /// A supervisor asks a worker to stop before resorting to aborting its task.
-/// Select on [`ShutdownSignal::cancelled`] inside [`run`](crate::Worker::run) so
+/// Take the signal in the worker's factory (`|signal| MyWorker { signal }`) and
+/// select on [`ShutdownSignal::cancelled`] inside [`run`](crate::Worker::run) so
 /// the worker can return promptly and let
 /// [`shutdown`](crate::Worker::shutdown) perform its cleanup.
 ///
@@ -78,14 +85,12 @@ pub enum ChildType {
 /// # Examples
 ///
 /// ```
-/// use ash_flare::{ShutdownSignal, Worker};
-/// use async_trait::async_trait;
+/// use ash_flare::{RestartPolicy, ShutdownSignal, SupervisorSpec, Worker};
 ///
 /// struct Pump {
 ///     shutdown: ShutdownSignal,
 /// }
 ///
-/// #[async_trait]
 /// impl Worker for Pump {
 ///     type Error = std::io::Error;
 ///
@@ -100,6 +105,10 @@ pub enum ChildType {
 ///         }
 ///     }
 /// }
+///
+/// // A factory that takes one argument receives the worker's signal.
+/// let spec = SupervisorSpec::new("app")
+///     .with_worker("pump", |shutdown| Pump { shutdown }, RestartPolicy::Permanent);
 /// ```
 #[derive(Clone, Debug)]
 pub struct ShutdownSignal {
@@ -150,9 +159,35 @@ impl ShutdownSignal {
     }
 }
 
-/// Shared context for stateful workers with in-memory key-value store.
+/// Process-local, concurrency-safe key-value store for sharing state between
+/// workers.
 ///
-/// Provides a process-local, concurrency-safe storage for workers to share state.
+/// Cloning is cheap and every clone sees the same data, so sharing state is a
+/// matter of capturing a clone in each worker's factory. Because the context
+/// lives outside the workers, its contents survive worker restarts.
+///
+/// ```
+/// use ash_flare::{RestartPolicy, SupervisorSpec, Worker, WorkerContext};
+///
+/// struct Counter { ctx: WorkerContext }
+///
+/// impl Worker for Counter {
+///     type Error = std::io::Error;
+///     async fn run(&mut self) -> Result<(), Self::Error> {
+///         self.ctx.update("count", |v| {
+///             let n = v.and_then(|v| v.as_u64()).unwrap_or(0);
+///             Some(serde_json::json!(n + 1))
+///         });
+///         Ok(())
+///     }
+/// }
+///
+/// let ctx = WorkerContext::new();
+/// let spec = SupervisorSpec::new("app")
+///     .with_worker("a", { let ctx = ctx.clone(); move || Counter { ctx: ctx.clone() } }, RestartPolicy::Transient)
+///     .with_worker("b", { let ctx = ctx.clone(); move || Counter { ctx: ctx.clone() } }, RestartPolicy::Transient);
+/// ```
+///
 /// The store is backed by `DashMap` for lock-free concurrent access.
 ///
 /// # Performance
@@ -302,25 +337,4 @@ impl Default for WorkerContext {
     fn default() -> Self {
         Self::new()
     }
-}
-
-// ============================================================================
-// Beam-ready Foundation Types
-// ============================================================================
-
-/// Process identifier (Beam-style) - foundation for future linking/monitoring
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Pid(pub u64);
-
-/// Extended exit reason for future Beam-like semantics
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub enum ExitReason {
-    /// Normal termination
-    Normal,
-    /// Killed/aborted
-    Killed,
-    /// Terminated with error
-    Error(String),
 }

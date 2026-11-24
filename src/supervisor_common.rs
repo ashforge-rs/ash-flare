@@ -1,17 +1,16 @@
-//! Shared internal utilities for supervisor implementations
+//! Internal supervision logic: restart decisions and the worker lifecycle
 
 use crate::restart::{BackoffTracker, RestartPolicy, RestartStrategy, RestartTracker};
+use crate::supervisor::SupervisorCommand;
 use crate::types::{ChildExitReason, ChildId, ShutdownSignal};
-use crate::worker::Worker;
+use crate::worker::DynWorker;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// What a supervisor should do after one of its children terminated.
 ///
-/// Produced by [`decide_restart`], which owns the supervision semantics shared
-/// by the stateless and stateful supervisors. Keeping this in one place means a
-/// change to restart behaviour cannot be applied to one runtime and forgotten in
-/// the other.
+/// Produced by [`decide_restart`], which owns the supervision semantics so the
+/// runtime only has to carry decisions out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestartDecision {
     /// The supervisor stopped this child itself; there is nothing to decide.
@@ -34,7 +33,7 @@ pub(crate) enum RestartDecision {
 ///
 /// This is the single source of truth for supervision semantics: policy check,
 /// restart-intensity accounting, and backoff. It is deliberately free of any
-/// runtime-specific types so both supervisor implementations can share it.
+/// runtime types so it can be unit-tested in isolation.
 ///
 /// `policy` is `None` for nested supervisors, which are always treated as
 /// permanent.
@@ -350,27 +349,19 @@ mod tests {
     }
 }
 
-/// Message sent when a worker terminates
-pub(crate) struct WorkerTermination {
-    pub id: ChildId,
-    pub reason: ChildExitReason,
-}
-
 /// Runs a worker with initialization, execution, and shutdown lifecycle
 ///
 /// When `shutdown` is triggered the worker's `run` future is dropped at its next
 /// await point, but `shutdown` is still awaited so cleanup runs. This is what
 /// makes graceful termination different from aborting the task outright.
-pub(crate) async fn run_worker<W: Worker, Cmd>(
+pub(crate) async fn run_worker(
     supervisor_name: String,
     worker_id: ChildId,
-    mut worker: W,
-    control_tx: mpsc::UnboundedSender<Cmd>,
+    mut worker: Box<dyn DynWorker>,
+    control_tx: mpsc::UnboundedSender<SupervisorCommand>,
     init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     shutdown: ShutdownSignal,
-) where
-    Cmd: From<WorkerTermination>,
-{
+) {
     let qualified_name = format!("{supervisor_name}/{worker_id}");
 
     // Initialize the worker
@@ -389,15 +380,12 @@ pub(crate) async fn run_worker<W: Worker, Cmd>(
             );
             // Send initialization failure if linked
             if let Some(tx) = init_tx {
-                let _send = tx.send(Err(err.to_string()));
+                let _send = tx.send(Err(err));
             }
-            let _send = control_tx.send(
-                WorkerTermination {
-                    id: worker_id,
-                    reason: ChildExitReason::Abnormal,
-                }
-                .into(),
-            );
+            let _send = control_tx.send(SupervisorCommand::ChildTerminated {
+                id: worker_id,
+                reason: ChildExitReason::Abnormal,
+            });
             return;
         }
     }
@@ -442,11 +430,8 @@ pub(crate) async fn run_worker<W: Worker, Cmd>(
     tracing::debug!(worker = %qualified_name, "worker stopped");
 
     // Notify supervisor of termination
-    let _send = control_tx.send(
-        WorkerTermination {
-            id: worker_id,
-            reason: exit_reason,
-        }
-        .into(),
-    );
+    let _send = control_tx.send(SupervisorCommand::ChildTerminated {
+        id: worker_id,
+        reason: exit_reason,
+    });
 }

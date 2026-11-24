@@ -1,8 +1,8 @@
 use ash_flare::distributed::{
-    ChildInfo, DistributedError, RemoteCommand, RemoteResponse, RemoteSupervisorHandle,
-    SupervisorAddress, SupervisorStatus,
+    DistributedError, RemoteCommand, RemoteResponse, RemoteSupervisorHandle, SupervisorAddress,
+    SupervisorStatus,
 };
-use ash_flare::{ChildInfo as SupervisorChildInfo, ChildType, RestartPolicy};
+use ash_flare::{ChildInfo, ChildType, RestartPolicy, RestartStrategy};
 
 #[test]
 fn test_supervisor_address_debug() {
@@ -56,7 +56,7 @@ fn test_remote_response_variants() {
     let status = RemoteResponse::Status(SupervisorStatus {
         name: "test".to_string(),
         children_count: 5,
-        restart_strategy: "OneForOne".to_string(),
+        restart_strategy: RestartStrategy::OneForOne,
         uptime_secs: 120,
     });
     assert!(format!("{:?}", status).contains("Status"));
@@ -109,13 +109,13 @@ fn test_supervisor_status_creation() {
     let status = SupervisorStatus {
         name: "main-supervisor".to_string(),
         children_count: 10,
-        restart_strategy: "OneForAll".to_string(),
+        restart_strategy: RestartStrategy::OneForAll,
         uptime_secs: 3600,
     };
 
     assert_eq!(status.name, "main-supervisor");
     assert_eq!(status.children_count, 10);
-    assert_eq!(status.restart_strategy, "OneForAll");
+    assert_eq!(status.restart_strategy, RestartStrategy::OneForAll);
     assert_eq!(status.uptime_secs, 3600);
 }
 
@@ -124,7 +124,7 @@ fn test_supervisor_status_debug() {
     let status = SupervisorStatus {
         name: "test-sup".to_string(),
         children_count: 5,
-        restart_strategy: "RestForOne".to_string(),
+        restart_strategy: RestartStrategy::RestForOne,
         uptime_secs: 60,
     };
 
@@ -178,7 +178,7 @@ fn test_supervisor_status_clone() {
     let status = SupervisorStatus {
         name: "sup".to_string(),
         children_count: 3,
-        restart_strategy: "OneForOne".to_string(),
+        restart_strategy: RestartStrategy::OneForOne,
         uptime_secs: 100,
     };
     let cloned = status.clone();
@@ -244,38 +244,6 @@ fn test_distributed_error_from_io() {
 }
 
 // ============================================================================
-// ChildInfo From Implementation Tests
-// ============================================================================
-
-#[test]
-fn test_child_info_from_supervisor_child_info() {
-    let supervisor_info = SupervisorChildInfo {
-        id: "worker-test".to_string(),
-        child_type: ChildType::Worker,
-        restart_policy: Some(RestartPolicy::Permanent),
-    };
-
-    let child_info: ChildInfo = supervisor_info.into();
-    assert_eq!(child_info.id, "worker-test");
-    assert_eq!(child_info.child_type, ChildType::Worker);
-    assert_eq!(child_info.restart_policy, Some(RestartPolicy::Permanent));
-}
-
-#[test]
-fn test_child_info_from_supervisor_info_supervisor_type() {
-    let supervisor_info = SupervisorChildInfo {
-        id: "sup-test".to_string(),
-        child_type: ChildType::Supervisor,
-        restart_policy: None,
-    };
-
-    let child_info: ChildInfo = supervisor_info.into();
-    assert_eq!(child_info.id, "sup-test");
-    assert_eq!(child_info.child_type, ChildType::Supervisor);
-    assert!(child_info.restart_policy.is_none());
-}
-
-// ============================================================================
 // RemoteSupervisorHandle Tests
 // ============================================================================
 
@@ -287,16 +255,16 @@ async fn test_remote_supervisor_handle_new() {
     let _ = handle;
 }
 
-#[tokio::test]
-async fn test_remote_supervisor_handle_connect_tcp() {
-    let result = RemoteSupervisorHandle::connect_tcp("localhost:9999").await;
-    assert!(result.is_ok());
+#[test]
+fn test_remote_supervisor_handle_tcp() {
+    let handle = RemoteSupervisorHandle::tcp("localhost:9999");
+    assert!(matches!(handle.address(), SupervisorAddress::Tcp(a) if a == "localhost:9999"));
 }
 
-#[tokio::test]
-async fn test_remote_supervisor_handle_connect_unix() {
-    let result = RemoteSupervisorHandle::connect_unix("/tmp/test.sock").await;
-    assert!(result.is_ok());
+#[test]
+fn test_remote_supervisor_handle_unix() {
+    let handle = RemoteSupervisorHandle::unix("/tmp/test.sock");
+    assert!(matches!(handle.address(), SupervisorAddress::Unix(p) if p == "/tmp/test.sock"));
 }
 
 // ============================================================================
@@ -364,7 +332,7 @@ fn test_supervisor_status_serialize() {
     let status = SupervisorStatus {
         name: "test".to_string(),
         children_count: 5,
-        restart_strategy: "OneForOne".to_string(),
+        restart_strategy: RestartStrategy::OneForOne,
         uptime_secs: 100,
     };
     let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&status);

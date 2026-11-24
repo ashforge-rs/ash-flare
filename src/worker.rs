@@ -1,36 +1,58 @@
 //! Worker trait and related types
 
 use crate::restart::RestartPolicy;
+use crate::supervisor::SupervisorCommand;
 use crate::supervisor_common::run_worker;
 use crate::types::{ChildId, ShutdownSignal};
-use async_trait::async_trait;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// A trait that all workers must implement to work with the supervisor tree.
-/// This allows for generic workers that can handle any type of work.
-#[async_trait]
-pub trait Worker: Send + Sync + 'static {
-    /// The type of error this worker can return
-    type Error: std::error::Error + Send + Sync + 'static;
+/// A unit of work run and restarted by a supervisor.
+///
+/// Implement it with plain `async fn`s; no attribute macro is needed:
+///
+/// ```
+/// use ash_flare::Worker;
+///
+/// struct Ticker;
+///
+/// impl Worker for Ticker {
+///     type Error = std::io::Error;
+///
+///     async fn run(&mut self) -> Result<(), Self::Error> {
+///         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+///         Ok(())
+///     }
+/// }
+/// ```
+///
+/// The futures returned by the methods must be `Send`, since workers run on the
+/// multi-threaded tokio runtime.
+pub trait Worker: Send + 'static {
+    /// The error this worker can fail with.
+    ///
+    /// Only [`Display`](fmt::Display) is required, so `anyhow::Error`,
+    /// `eyre::Report` or a plain `String` all work.
+    type Error: fmt::Display + Send + 'static;
 
-    /// Run the worker's main loop - this should run until completion or error
+    /// Runs the worker's main loop until it completes or fails.
     ///
     /// When the supervisor terminates this worker, this future is dropped at its
     /// next await point. To wind down on your own terms instead, take a
-    /// [`ShutdownSignal`](crate::ShutdownSignal) via
-    /// [`SupervisorSpec::with_worker_signal`](crate::SupervisorSpec::with_worker_signal)
+    /// [`ShutdownSignal`] in the worker's factory (`|signal| MyWorker { signal }`)
     /// and select on it.
-    async fn run(&mut self) -> Result<(), Self::Error>;
+    fn run(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Called when the worker is initialized
-    async fn initialize(&mut self) -> Result<(), Self::Error> {
-        Ok(())
+    /// Called once before [`run`](Worker::run).
+    fn initialize(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        async { Ok(()) }
     }
 
-    /// Called when the worker is being shut down
+    /// Called when the worker is being shut down.
     ///
     /// Runs after `run` returns, whether it finished on its own, failed, or was
     /// cancelled because the supervisor asked the worker to stop. Use it to
@@ -40,60 +62,113 @@ pub trait Worker: Send + Sync + 'static {
     /// supervisor's shutdown timeout — for example if `run` blocks the thread
     /// without awaiting — because the task is then aborted outright. Keep
     /// cleanup well under that timeout; work that overruns it is abandoned.
-    async fn shutdown(&mut self) -> Result<(), Self::Error> {
-        Ok(())
+    fn shutdown(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        async { Ok(()) }
     }
 }
 
-/// Specification for creating and restarting a worker
+// ============================================================================
+// Type erasure
+// ============================================================================
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Object-safe form of [`Worker`], so one supervisor can hold workers of
+/// different concrete types. Errors are rendered to strings at this boundary;
+/// the runtime only ever logs or forwards them.
+pub(crate) trait DynWorker: Send {
+    fn initialize(&mut self) -> BoxFuture<'_, Result<(), String>>;
+    fn run(&mut self) -> BoxFuture<'_, Result<(), String>>;
+    fn shutdown(&mut self) -> BoxFuture<'_, Result<(), String>>;
+}
+
+impl<W: Worker> DynWorker for W {
+    fn initialize(&mut self) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move { Worker::initialize(self).await.map_err(|e| e.to_string()) })
+    }
+
+    fn run(&mut self) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move { Worker::run(self).await.map_err(|e| e.to_string()) })
+    }
+
+    fn shutdown(&mut self) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move { Worker::shutdown(self).await.map_err(|e| e.to_string()) })
+    }
+}
+
+/// Builds worker instances for a supervisor, on first start and on every
+/// restart.
 ///
-/// The factory receives the worker's [`ShutdownSignal`] so a worker can observe
-/// cooperative termination. Factories registered through the plain
-/// `Fn() -> W` API simply ignore it.
-pub(crate) struct WorkerSpec<W: Worker> {
+/// Implemented for closures of two shapes, so either can be passed wherever a
+/// factory is expected:
+///
+/// - `Fn() -> W` for workers that do not care how they are stopped;
+/// - `Fn(ShutdownSignal) -> W` for workers that want to observe cooperative
+///   shutdown from inside `run`.
+///
+/// The `Marker` parameter only exists to keep those two implementations apart
+/// and is always inferred.
+pub trait WorkerFactory<Marker>: Send + Sync + 'static {
+    /// The worker type this factory produces.
+    type Worker: Worker;
+
+    /// Creates a fresh worker.
+    fn create(&self, signal: ShutdownSignal) -> Self::Worker;
+}
+
+impl<F, W> WorkerFactory<()> for F
+where
+    F: Fn() -> W + Send + Sync + 'static,
+    W: Worker,
+{
+    type Worker = W;
+
+    fn create(&self, _signal: ShutdownSignal) -> W {
+        self()
+    }
+}
+
+impl<F, W> WorkerFactory<ShutdownSignal> for F
+where
+    F: Fn(ShutdownSignal) -> W + Send + Sync + 'static,
+    W: Worker,
+{
+    type Worker = W;
+
+    fn create(&self, signal: ShutdownSignal) -> W {
+        self(signal)
+    }
+}
+
+type ErasedFactory = Arc<dyn Fn(ShutdownSignal) -> Box<dyn DynWorker> + Send + Sync>;
+
+/// Specification for creating and restarting a worker
+#[derive(Clone)]
+pub(crate) struct WorkerSpec {
     pub id: ChildId,
-    pub worker_factory: Arc<dyn Fn(ShutdownSignal) -> W + Send + Sync>,
+    factory: ErasedFactory,
     pub restart_policy: RestartPolicy,
 }
 
-impl<W: Worker> Clone for WorkerSpec<W> {
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id.clone(),
-            worker_factory: Arc::clone(&self.worker_factory),
-            restart_policy: self.restart_policy,
-        }
-    }
-}
-
-impl<W: Worker> WorkerSpec<W> {
-    pub(crate) fn new(
+impl WorkerSpec {
+    pub(crate) fn new<M>(
         id: impl Into<String>,
-        factory: impl Fn() -> W + Send + Sync + 'static,
-        restart_policy: RestartPolicy,
-    ) -> Self {
-        Self::with_signal(id, move |_signal| factory(), restart_policy)
-    }
-
-    /// Builds a spec whose factory receives the worker's [`ShutdownSignal`].
-    pub(crate) fn with_signal(
-        id: impl Into<String>,
-        factory: impl Fn(ShutdownSignal) -> W + Send + Sync + 'static,
+        factory: impl WorkerFactory<M>,
         restart_policy: RestartPolicy,
     ) -> Self {
         Self {
             id: id.into(),
-            worker_factory: Arc::new(factory),
+            factory: Arc::new(move |signal| Box::new(factory.create(signal))),
             restart_policy,
         }
     }
 
-    pub(crate) fn create_worker(&self, signal: ShutdownSignal) -> W {
-        (self.worker_factory)(signal)
+    fn create_worker(&self, signal: ShutdownSignal) -> Box<dyn DynWorker> {
+        (self.factory)(signal)
     }
 }
 
-impl<W: Worker> fmt::Debug for WorkerSpec<W> {
+impl fmt::Debug for WorkerSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WorkerSpec")
             .field("id", &self.id)
@@ -102,64 +177,56 @@ impl<W: Worker> fmt::Debug for WorkerSpec<W> {
     }
 }
 
+// ============================================================================
+// Running worker
+// ============================================================================
+
 /// Running worker process with its specification and task handle
-pub(crate) struct WorkerProcess<W: Worker> {
-    pub spec: WorkerSpec<W>,
-    pub handle: Option<JoinHandle<()>>,
+pub(crate) struct WorkerProcess {
+    pub spec: WorkerSpec,
+    handle: Option<JoinHandle<()>>,
     /// Triggers cooperative shutdown; dropping it also releases the worker.
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
-impl<W: Worker> WorkerProcess<W> {
-    pub(crate) fn spawn<Cmd>(
-        spec: WorkerSpec<W>,
+impl WorkerProcess {
+    pub(crate) fn spawn(
+        spec: WorkerSpec,
         supervisor_name: String,
-        control_tx: mpsc::UnboundedSender<Cmd>,
-    ) -> Self
-    where
-        Cmd: From<WorkerTermination> + Send + 'static,
-    {
+        control_tx: mpsc::UnboundedSender<SupervisorCommand>,
+    ) -> Self {
         Self::spawn_inner(spec, supervisor_name, control_tx, None)
     }
 
     /// Spawns a worker with linked initialization handshake
-    pub(crate) fn spawn_with_link<Cmd>(
-        spec: WorkerSpec<W>,
+    pub(crate) fn spawn_with_link(
+        spec: WorkerSpec,
         supervisor_name: String,
-        control_tx: mpsc::UnboundedSender<Cmd>,
+        control_tx: mpsc::UnboundedSender<SupervisorCommand>,
         init_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
-    ) -> Self
-    where
-        Cmd: From<WorkerTermination> + Send + 'static,
-    {
+    ) -> Self {
         Self::spawn_inner(spec, supervisor_name, control_tx, Some(init_tx))
     }
 
-    fn spawn_inner<Cmd>(
-        spec: WorkerSpec<W>,
+    fn spawn_inner(
+        spec: WorkerSpec,
         supervisor_name: String,
-        control_tx: mpsc::UnboundedSender<Cmd>,
+        control_tx: mpsc::UnboundedSender<SupervisorCommand>,
         init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    ) -> Self
-    where
-        Cmd: From<WorkerTermination> + Send + 'static,
-    {
+    ) -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let worker = spec.create_worker(ShutdownSignal::new(shutdown_rx.clone()));
         let worker_id = spec.id.clone();
         let signal = ShutdownSignal::new(shutdown_rx);
 
-        let handle = tokio::spawn(async move {
-            run_worker(
-                supervisor_name,
-                worker_id,
-                worker,
-                control_tx,
-                init_tx,
-                signal,
-            )
-            .await;
-        });
+        let handle = tokio::spawn(run_worker(
+            supervisor_name,
+            worker_id,
+            worker,
+            control_tx,
+            init_tx,
+            signal,
+        ));
 
         Self {
             spec,
@@ -205,42 +272,10 @@ impl<W: Worker> WorkerProcess<W> {
     }
 }
 
-impl<W: Worker> Drop for WorkerProcess<W> {
+impl Drop for WorkerProcess {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
     }
 }
-
-// Re-export WorkerTermination from supervisor_common
-pub(crate) use crate::supervisor_common::WorkerTermination;
-
-/// Errors returned by worker operations.
-#[derive(Debug)]
-pub enum WorkerError {
-    /// Command channel was closed unexpectedly
-    CommandChannelClosed(String),
-    /// Worker panicked during execution
-    WorkerPanicked(String),
-    /// Worker failed with an error
-    WorkerFailed(String),
-}
-
-impl fmt::Display for WorkerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WorkerError::CommandChannelClosed(name) => {
-                write!(f, "command channel to {name} is closed")
-            }
-            WorkerError::WorkerPanicked(name) => {
-                write!(f, "worker {name} panicked")
-            }
-            WorkerError::WorkerFailed(msg) => {
-                write!(f, "worker failed: {msg}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for WorkerError {}

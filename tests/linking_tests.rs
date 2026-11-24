@@ -1,7 +1,6 @@
 //! Tests for start_child_linked functionality
 
 use ash_flare::{RestartPolicy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
@@ -28,8 +27,6 @@ struct SuccessWorker {
     counter: Arc<AtomicU32>,
     init_flag: Arc<AtomicBool>,
 }
-
-#[async_trait]
 impl Worker for SuccessWorker {
     type Error = WorkerError;
 
@@ -52,8 +49,6 @@ impl Worker for SuccessWorker {
 struct FailingWorker {
     should_fail: Arc<AtomicBool>,
 }
-
-#[async_trait]
 impl Worker for FailingWorker {
     type Error = WorkerError;
 
@@ -77,8 +72,6 @@ impl Worker for FailingWorker {
 struct SlowWorker {
     init_duration: Duration,
 }
-
-#[async_trait]
 impl Worker for SlowWorker {
     type Error = WorkerError;
 
@@ -100,7 +93,7 @@ impl Worker for SlowWorker {
 #[tokio::test]
 async fn test_start_child_linked_success() {
     let spec = SupervisorSpec::new("test-supervisor");
-    let handle: SupervisorHandle<SuccessWorker> = SupervisorHandle::start(spec);
+    let handle: SupervisorHandle = SupervisorHandle::start(spec);
 
     let counter = Arc::new(AtomicU32::new(0));
     let init_flag = Arc::new(AtomicBool::new(false));
@@ -147,7 +140,7 @@ async fn test_start_child_linked_success() {
 #[tokio::test]
 async fn test_start_child_linked_initialization_failure() {
     let spec = SupervisorSpec::new("test-supervisor");
-    let handle: SupervisorHandle<FailingWorker> = SupervisorHandle::start(spec);
+    let handle: SupervisorHandle = SupervisorHandle::start(spec);
 
     let should_fail = Arc::new(AtomicBool::new(true));
     let f = Arc::clone(&should_fail);
@@ -185,7 +178,7 @@ async fn test_start_child_linked_initialization_failure() {
 #[tokio::test]
 async fn test_start_child_linked_timeout() {
     let spec = SupervisorSpec::new("test-supervisor");
-    let handle: SupervisorHandle<SlowWorker> = SupervisorHandle::start(spec);
+    let handle: SupervisorHandle = SupervisorHandle::start(spec);
 
     // Start child with linked initialization (timeout too short)
     let result = handle
@@ -220,7 +213,7 @@ async fn test_start_child_linked_timeout() {
 #[tokio::test]
 async fn test_start_child_linked_duplicate_id() {
     let spec = SupervisorSpec::new("test-supervisor");
-    let handle: SupervisorHandle<SuccessWorker> = SupervisorHandle::start(spec);
+    let handle: SupervisorHandle = SupervisorHandle::start(spec);
 
     let counter1 = Arc::new(AtomicU32::new(0));
     let init_flag1 = Arc::new(AtomicBool::new(false));
@@ -278,7 +271,7 @@ async fn test_start_child_linked_duplicate_id() {
 #[tokio::test]
 async fn test_start_child_linked_multiple_children() {
     let spec = SupervisorSpec::new("test-supervisor");
-    let handle: SupervisorHandle<SuccessWorker> = SupervisorHandle::start(spec);
+    let handle: SupervisorHandle = SupervisorHandle::start(spec);
 
     // Start multiple children with linked initialization
     for i in 0..5 {
@@ -311,7 +304,7 @@ async fn test_start_child_linked_multiple_children() {
 #[tokio::test]
 async fn test_start_child_linked_mixed_with_regular_start() {
     let spec = SupervisorSpec::new("test-supervisor");
-    let handle: SupervisorHandle<SuccessWorker> = SupervisorHandle::start(spec);
+    let handle: SupervisorHandle = SupervisorHandle::start(spec);
 
     // Start regular child (no linking)
     let counter1 = Arc::new(AtomicU32::new(0));
@@ -363,7 +356,7 @@ async fn test_start_child_linked_no_restart_on_init_failure() {
         .with_restart_strategy(ash_flare::RestartStrategy::OneForOne)
         .with_restart_intensity(ash_flare::RestartIntensity::new(10, 5));
 
-    let handle: SupervisorHandle<FailingWorker> = SupervisorHandle::start(spec);
+    let handle: SupervisorHandle = SupervisorHandle::start(spec);
 
     let should_fail = Arc::new(AtomicBool::new(true));
     let f = Arc::clone(&should_fail);

@@ -1,20 +1,56 @@
 //! Supervisor specification and builder
 
 use crate::restart::{RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy};
-use crate::worker::{Worker, WorkerSpec};
+use crate::worker::{WorkerFactory, WorkerSpec};
 use std::sync::Arc;
 use std::time::Duration;
 
 /// Specification for a child (either worker or supervisor)
-pub(crate) enum ChildSpec<W: Worker> {
-    Worker(WorkerSpec<W>),
-    Supervisor(Arc<SupervisorSpec<W>>),
+#[derive(Clone)]
+pub(crate) enum ChildSpec {
+    Worker(WorkerSpec),
+    Supervisor(Arc<SupervisorSpec>),
+}
+
+impl ChildSpec {
+    /// Identifier this child will be registered under.
+    #[cfg(feature = "python")]
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            ChildSpec::Worker(w) => &w.id,
+            ChildSpec::Supervisor(s) => &s.name,
+        }
+    }
 }
 
 /// Describes a supervisor and its children in a tree structure.
-pub struct SupervisorSpec<W: Worker> {
+///
+/// Workers of different types can be mixed freely in one tree:
+///
+/// ```
+/// use ash_flare::{RestartPolicy, SupervisorSpec, Worker};
+///
+/// struct Http;
+/// struct Db;
+///
+/// impl Worker for Http {
+///     type Error = std::io::Error;
+///     async fn run(&mut self) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
+/// impl Worker for Db {
+///     type Error = String;
+///     async fn run(&mut self) -> Result<(), Self::Error> { Ok(()) }
+/// }
+///
+/// let spec = SupervisorSpec::new("app")
+///     .with_worker("http", || Http, RestartPolicy::Permanent)
+///     .with_worker("db", || Db, RestartPolicy::Transient);
+/// ```
+#[derive(Clone)]
+pub struct SupervisorSpec {
     pub(crate) name: String,
-    pub(crate) children: Vec<ChildSpec<W>>,
+    pub(crate) children: Vec<ChildSpec>,
     pub(crate) restart_strategy: RestartStrategy,
     pub(crate) restart_intensity: RestartIntensity,
     pub(crate) restart_backoff: RestartBackoff,
@@ -24,50 +60,7 @@ pub struct SupervisorSpec<W: Worker> {
 /// Default grace period a worker gets to stop cooperatively before being aborted.
 pub(crate) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-impl<W: Worker> Clone for SupervisorSpec<W> {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            children: self.children.clone(),
-            restart_strategy: self.restart_strategy,
-            restart_intensity: self.restart_intensity,
-            restart_backoff: self.restart_backoff,
-            shutdown_timeout: self.shutdown_timeout,
-        }
-    }
-}
-
-// Only the Python bindings validate ids at registration time; the Rust builder
-// leaves duplicate detection to `start_child`.
-#[cfg(feature = "python")]
-impl<W: Worker> ChildSpec<W> {
-    /// Identifier this child will be registered under.
-    pub(crate) fn id(&self) -> &str {
-        match self {
-            ChildSpec::Worker(w) => &w.id,
-            ChildSpec::Supervisor(s) => &s.name,
-        }
-    }
-}
-
-#[cfg(feature = "python")]
-impl<W: Worker> SupervisorSpec<W> {
-    /// Returns true if a child with `id` is already registered.
-    pub(crate) fn has_child(&self, id: &str) -> bool {
-        self.children.iter().any(|c| c.id() == id)
-    }
-}
-
-impl<W: Worker> Clone for ChildSpec<W> {
-    fn clone(&self) -> Self {
-        match self {
-            ChildSpec::Worker(w) => ChildSpec::Worker(w.clone()),
-            ChildSpec::Supervisor(s) => ChildSpec::Supervisor(Arc::clone(s)),
-        }
-    }
-}
-
-impl<W: Worker> SupervisorSpec<W> {
+impl SupervisorSpec {
     /// Creates a new supervisor specification with the provided name.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -78,6 +71,12 @@ impl<W: Worker> SupervisorSpec<W> {
             restart_backoff: RestartBackoff::default(),
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
         }
+    }
+
+    /// Returns true if a child with `id` is already registered.
+    #[cfg(feature = "python")]
+    pub(crate) fn has_child(&self, id: &str) -> bool {
+        self.children.iter().any(|c| c.id() == id)
     }
 
     /// Sets the restart strategy for this supervisor.
@@ -128,34 +127,37 @@ impl<W: Worker> SupervisorSpec<W> {
         self
     }
 
-    /// Adds a worker child to this supervisor specification, giving the factory
-    /// access to the worker's [`ShutdownSignal`](crate::ShutdownSignal).
-    ///
-    /// Use this instead of [`SupervisorSpec::with_worker`] when the worker needs
-    /// to observe cooperative shutdown from inside its `run` loop.
-    #[must_use]
-    pub fn with_worker_signal(
-        mut self,
-        id: impl Into<String>,
-        factory: impl Fn(crate::ShutdownSignal) -> W + Send + Sync + 'static,
-        restart_policy: RestartPolicy,
-    ) -> Self {
-        self.children
-            .push(ChildSpec::Worker(WorkerSpec::with_signal(
-                id,
-                factory,
-                restart_policy,
-            )));
-        self
-    }
-
     /// Adds a worker child to this supervisor specification.
-    /// The factory function is used to create new worker instances (e.g., for restarts).
+    ///
+    /// The factory is called to create a fresh worker on first start and on
+    /// every restart. It may take no arguments, or the worker's
+    /// [`ShutdownSignal`](crate::ShutdownSignal) if the worker needs to observe
+    /// cooperative shutdown from inside its `run` loop:
+    ///
+    /// ```
+    /// use ash_flare::{RestartPolicy, ShutdownSignal, SupervisorSpec, Worker};
+    ///
+    /// struct Pump { shutdown: ShutdownSignal }
+    ///
+    /// impl Worker for Pump {
+    ///     type Error = std::io::Error;
+    ///     async fn run(&mut self) -> Result<(), Self::Error> {
+    ///         self.shutdown.cancelled().await;
+    ///         Ok(())
+    ///     }
+    /// }
+    ///
+    /// let spec = SupervisorSpec::new("app")
+    ///     .with_worker("pump", |shutdown| Pump { shutdown }, RestartPolicy::Permanent);
+    /// ```
+    ///
+    /// To share state between workers, capture a clone of it in the factory,
+    /// for example a [`WorkerContext`](crate::WorkerContext).
     #[must_use]
-    pub fn with_worker(
+    pub fn with_worker<M>(
         mut self,
         id: impl Into<String>,
-        factory: impl Fn() -> W + Send + Sync + 'static,
+        factory: impl WorkerFactory<M>,
         restart_policy: RestartPolicy,
     ) -> Self {
         self.children.push(ChildSpec::Worker(WorkerSpec::new(
@@ -168,7 +170,7 @@ impl<W: Worker> SupervisorSpec<W> {
 
     /// Adds a nested supervisor child to this supervisor specification.
     #[must_use]
-    pub fn with_supervisor(mut self, supervisor: SupervisorSpec<W>) -> Self {
+    pub fn with_supervisor(mut self, supervisor: SupervisorSpec) -> Self {
         self.children
             .push(ChildSpec::Supervisor(Arc::new(supervisor)));
         self

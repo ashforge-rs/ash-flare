@@ -9,7 +9,6 @@
 use ash_flare::{
     RestartIntensity, RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker,
 };
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -65,8 +64,6 @@ impl QueueWorker {
         Ok(())
     }
 }
-
-#[async_trait]
 impl Worker for QueueWorker {
     type Error = WorkerError;
 

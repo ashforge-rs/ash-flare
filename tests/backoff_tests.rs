@@ -4,7 +4,6 @@
 use ash_flare::{
     RestartBackoff, RestartIntensity, RestartPolicy, SupervisorHandle, SupervisorSpec, Worker,
 };
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -13,8 +12,6 @@ use std::time::Duration;
 struct CrashLoop {
     attempts: Arc<AtomicUsize>,
 }
-
-#[async_trait]
 impl Worker for CrashLoop {
     type Error = std::io::Error;
 
@@ -24,7 +21,7 @@ impl Worker for CrashLoop {
     }
 }
 
-fn crash_loop_spec(attempts: &Arc<AtomicUsize>) -> SupervisorSpec<CrashLoop> {
+fn crash_loop_spec(attempts: &Arc<AtomicUsize>) -> SupervisorSpec {
     let counter = Arc::clone(attempts);
     SupervisorSpec::new("root").with_worker(
         "crasher",
