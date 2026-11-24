@@ -1,7 +1,7 @@
 //! Worker pool with shared mailbox example
 //!
 //! This example demonstrates:
-//! - Multiple workers sharing a single mailbox (via Arc<Mutex<>>)
+//! - A pool of workers sharing one mailbox (clones of a `Mailbox` share a queue)
 //! - Workers competing to process messages
 //! - Simple string-based message passing
 //! - Supervision of mailbox workers
@@ -10,9 +10,7 @@ use ash_flare::{
     Mailbox, RestartPolicy, SupervisorHandle, SupervisorSpec, Worker,
     mailbox::{MailboxConfig, mailbox},
 };
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 #[derive(Debug)]
@@ -29,11 +27,11 @@ impl std::error::Error for WorkerError {}
 /// Worker that processes messages from a shared mailbox
 struct PoolWorker {
     worker_id: usize,
-    mailbox: Arc<Mutex<Mailbox>>,
+    mailbox: Mailbox,
 }
 
 impl PoolWorker {
-    fn new(worker_id: usize, mailbox: Arc<Mutex<Mailbox>>) -> Self {
+    fn new(worker_id: usize, mailbox: Mailbox) -> Self {
         Self { worker_id, mailbox }
     }
 
@@ -60,13 +58,8 @@ impl Worker for PoolWorker {
         println!("[Worker {}] Started", self.worker_id);
 
         loop {
-            // Lock the shared mailbox and try to receive a message
-            let msg = {
-                let mut mailbox = self.mailbox.lock().await;
-                mailbox.recv().await
-            };
-
-            match msg {
+            // Each message goes to whichever pool member asks first.
+            match self.mailbox.recv().await {
                 Some(msg) => {
                     self.process_message(msg).await?;
                 }
@@ -92,35 +85,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a bounded mailbox for the worker pool
     let (handle, mailbox) = mailbox(MailboxConfig::bounded(20));
-    let shared_mailbox = Arc::new(Mutex::new(mailbox));
 
-    // Build supervisor with 4 workers sharing the mailbox
-    let mb1 = Arc::clone(&shared_mailbox);
-    let mb2 = Arc::clone(&shared_mailbox);
-    let mb3 = Arc::clone(&shared_mailbox);
-    let mb4 = Arc::clone(&shared_mailbox);
-
-    let spec = SupervisorSpec::new("worker-pool")
-        .with_worker(
-            "worker-1",
-            move || PoolWorker::new(1, Arc::clone(&mb1)),
-            RestartPolicy::Permanent,
-        )
-        .with_worker(
-            "worker-2",
-            move || PoolWorker::new(2, Arc::clone(&mb2)),
-            RestartPolicy::Permanent,
-        )
-        .with_worker(
-            "worker-3",
-            move || PoolWorker::new(3, Arc::clone(&mb3)),
-            RestartPolicy::Permanent,
-        )
-        .with_worker(
-            "worker-4",
-            move || PoolWorker::new(4, Arc::clone(&mb4)),
-            RestartPolicy::Permanent,
-        );
+    // A pool of 4 workers sharing the mailbox; restarted members get a clone
+    // of the same mailbox, so queued messages are not lost.
+    let spec = SupervisorSpec::new("worker-pool").with_worker_pool(
+        "worker",
+        4,
+        move |index| PoolWorker::new(index + 1, mailbox.clone()),
+        RestartPolicy::Permanent,
+    );
 
     let supervisor = SupervisorHandle::start(spec).expect("valid supervisor spec");
 

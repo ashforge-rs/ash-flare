@@ -1,79 +1,51 @@
-//! Fault-tolerant supervision trees for Rust with distributed capabilities.
+//! Fault-tolerant supervision trees for Rust, modelled on Erlang/OTP.
 //!
-//! Build resilient systems that automatically recover from failures using supervisor trees,
-//! restart strategies, and distributed supervision inspired by Erlang/OTP.
-//!
-//! # Features
-//!
-//! - **Supervision Trees**: Hierarchical supervision with nested supervisors and workers
-//! - **Restart Strategies**: `OneForOne`, `OneForAll`, and `RestForOne` strategies
-//! - **Restart Policies**: `Permanent`, `Temporary`, and `Transient` restart behaviors
-//! - **Restart Intensity**: Configurable restart limits with sliding time windows
-//! - **Restart Backoff**: Exponential delay between restarts so a crash-looping
-//!   child cannot saturate a CPU core
-//! - **Graceful Shutdown**: Workers are asked to stop via a
-//!   [`ShutdownSignal`] and get their `shutdown` hook run before being aborted
-//! - **Distributed**: Run supervisors across processes or machines via TCP/Unix sockets
-//! - **Heterogeneous Trees**: Workers of different types mix freely in one tree
-//! - **Shared State**: [`WorkerContext`], a concurrent key-value store workers
-//!   can share and that survives their restarts
-//! - **Dynamic Management**: Add/remove children at runtime
-//! - **Structured Logging**: Built-in support for `tracing` structured logging
-//! - **Mailbox System**: Optional message-passing for workers with string-based messages
-//!
-//! # Quick Start
+//! A [`SupervisorSpec`] describes a tree of workers and nested supervisors;
+//! [`SupervisorHandle::start`] runs it. Failed children are restarted according
+//! to their [`RestartPolicy`], the supervisor's [`RestartStrategy`], and its
+//! restart intensity and backoff.
 //!
 //! ```rust
-//! use ash_flare::{SupervisorSpec, SupervisorHandle, RestartPolicy, Worker};
+//! use ash_flare::{RestartPolicy, SupervisorHandle, SupervisorSpec, Worker};
 //!
-//! struct Counter {
-//!     id: u32,
-//!     max: u32,
-//! }
+//! struct Ticker;
 //!
-//! impl Worker for Counter {
+//! impl Worker for Ticker {
 //!     type Error = std::io::Error;
 //!
 //!     async fn run(&mut self) -> Result<(), Self::Error> {
-//!         for i in 0..self.max {
-//!             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-//!         }
+//!         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 //!         Ok(())
 //!     }
 //! }
 //!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Build supervisor tree
-//! let spec = SupervisorSpec::new("root")
-//!     .with_worker("counter-1", || Counter { id: 1, max: 5 }, RestartPolicy::Permanent)
-//!     .with_worker("counter-2", || Counter { id: 2, max: 5 }, RestartPolicy::Permanent);
+//! let spec = SupervisorSpec::new("app")
+//!     .with_worker("ticker", || Ticker, RestartPolicy::Permanent);
 //!
-//! // Start supervision tree
-//! let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
-//!
-//! // Query children
+//! let handle = SupervisorHandle::start(spec)?;
 //! let children = handle.which_children().await?;
-//!
-//! // Graceful shutdown; returns once every worker has stopped
 //! handle.shutdown().await?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! # Restart Strategies
+//! # Overview
 //!
-//! - **`OneForOne`**: Restarts only the failed child (default)
-//! - **`OneForAll`**: Restarts all children if any child fails
-//! - **`RestForOne`**: Restarts the failed child and all children started after it
+//! - **Children**: [`Worker`], [`ChildSpec`] with per-child [`Shutdown`],
+//!   significant children and [`AutoShutdown`], worker pools.
+//! - **Failure handling**: panics are supervised like errors; [`ShutdownOrder`]
+//!   controls how children are stopped together.
+//! - **Monitoring**: [`SupervisorHandle::subscribe`] for [`SupervisorEvent`]s,
+//!   [`link`] and [`SupervisorHandle::kill_child`].
+//! - **Messaging**: typed [mailboxes](mod@mailbox) with call/cast and a [`Registry`].
+//! - **Blocking work**: [`ChildSpec::isolated`] and
+//!   [`SupervisorSpec::with_stall_detection`].
+//! - **Shared state**: [`WorkerContext`].
+//! - **Remote control**: the [`distributed`] module.
 //!
-//! # Examples
-//!
-//! See the [examples directory](https://github.com/ashforge-rs/ash-flare/tree/master/examples) for more:
-//!
-//! - `counter.rs` - Basic supervisor with multiple workers
-//! - `distributed.rs` - Network-distributed supervisors
-//! - `super_tree.rs` - Complex nested supervision trees
+//! See the [examples](https://github.com/ashforge-rs/ash-flare/tree/master/examples).
 
 #![deny(missing_docs)]
 #![warn(clippy::all)]

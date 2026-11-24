@@ -1,305 +1,139 @@
-# Ash-Flare Architecture
+# Architecture
 
-## System Overview
+## Overview
+
+A supervisor is a single tokio task, the runtime, that owns its children and processes one command at a
+time from an unbounded channel. Handles, workers and nested supervisors all talk to it through that
+channel, so supervision state is never shared or locked.
 
 ```mermaid
 graph TB
     subgraph "Public API"
-        SupervisorSpec[SupervisorSpec<br/>Builder Pattern]
-        SupervisorHandle[SupervisorHandle<br/>External Control]
-        Worker[Worker Trait<br/>run/initialize/shutdown]
+        Spec[SupervisorSpec / ChildSpec]
+        Handle[SupervisorHandle]
+        Events[SupervisorEvent stream]
     end
 
-    subgraph "Supervision Core"
-        Runtime[SupervisorRuntime<br/>State Machine]
-        RestartTracker[RestartTracker<br/>Time-windowed Limiting]
-        CommandChannel[Command Channel<br/>mpsc::unbounded]
+    subgraph "Supervisor task"
+        Runtime[SupervisorRuntime]
+        Children[Children<br/>ordered list + id index]
+        Decide[decide_restart<br/>policy, intensity, backoff]
     end
 
-    subgraph "Worker Management"
-        WorkerProcess[WorkerProcess<br/>Lifecycle Manager]
-        WorkerSpec[WorkerSpec<br/>Factory Pattern]
-        RunWorker[run_worker<br/>Async Executor]
+    subgraph "Children"
+        Worker[Worker task<br/>run_worker]
+        Isolated[Isolated worker<br/>own thread and runtime]
+        Nested[Nested supervisor]
     end
 
-    subgraph "Restart Policies"
-        RestartStrategy[RestartStrategy<br/>OneForOne/OneForAll/RestForOne]
-        RestartPolicy[RestartPolicy<br/>Permanent/Temporary/Transient]
-        RestartIntensity[RestartIntensity<br/>max_restarts/within_seconds]
-    end
-
-    subgraph "Distributed Layer"
-        RemoteHandle[RemoteSupervisorHandle<br/>Client]
-        SupervisorServer[SupervisorServer<br/>TCP/Unix Socket Server]
-        RemoteCommand[RemoteCommand/Response<br/>Bincode Serialization]
-    end
-
-    SupervisorSpec -->|start| SupervisorHandle
-    SupervisorHandle -->|commands| CommandChannel
-    CommandChannel -->|receives| Runtime
-    Runtime -->|spawns| WorkerProcess
-    WorkerProcess -->|uses| WorkerSpec
-    WorkerProcess -->|runs| RunWorker
-    RunWorker -->|implements| Worker
-    Runtime -->|applies| RestartStrategy
-    Runtime -->|checks| RestartPolicy
-    Runtime -->|tracks| RestartTracker
-    RestartTracker -->|enforces| RestartIntensity
-    SupervisorHandle -->|wraps| SupervisorServer
-    RemoteHandle -->|connects| SupervisorServer
-    SupervisorServer -->|forwards| CommandChannel
-    RemoteHandle -->|sends| RemoteCommand
+    Spec -->|start| Handle
+    Handle -->|commands| Runtime
+    Runtime --> Children
+    Runtime --> Decide
+    Runtime -->|spawn| Worker
+    Runtime -->|spawn| Isolated
+    Runtime -->|start| Nested
+    Worker -->|ChildTerminated| Runtime
+    Isolated -->|ChildTerminated| Runtime
+    Nested -->|ChildTerminated| Runtime
+    Runtime --> Events
 ```
 
-## Module Structure
+## Modules
 
-```mermaid
-graph LR
-    subgraph "src/"
-        lib[lib.rs<br/>Public API]
-        restart[restart.rs<br/>Policies & Tracking]
-        types[types.rs<br/>Common Types]
-        worker[worker.rs<br/>Worker Trait & Process]
-        supervisor[supervisor.rs<br/>Supervisor Logic]
-        distributed[distributed.rs<br/>Network Layer]
-        mailbox[mailbox.rs<br/>Message Passing]
-        macros[macros.rs<br/>Convenience Macros]
-    end
+| Module | Responsibility |
+|---|---|
+| `worker` | `Worker` trait, type erasure, `WorkerProcess`, isolated execution |
+| `supervisor` | Spec, handle, runtime, child bookkeeping, errors |
+| `supervisor_common` | Restart decisions and the worker lifecycle |
+| `restart` | Strategies, policies, intensity and backoff tracking |
+| `events` | `SupervisorEvent`, child instance numbers |
+| `link` | Links between children |
+| `panic` | Turning panics into abnormal exits |
+| `stall` | Poll timing and the stall watchdog |
+| `mailbox` | Typed mailboxes, call/cast |
+| `registry` | Name registry |
+| `distributed` | Remote control protocol, handshake and authentication |
+| `python` | Python bindings (`python` feature) |
 
-    lib --> restart
-    lib --> types
-    lib --> worker
-    lib --> supervisor
-    lib --> distributed
-    lib --> mailbox
-    lib --> macros
-    
-    types --> restart
-    worker --> types
-    supervisor --> restart
-    supervisor --> types
-    supervisor --> worker
-    distributed --> types
-```
-
-## Supervision Tree Flow
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant Handle as SupervisorHandle
-    participant Runtime as SupervisorRuntime
-    participant Worker as WorkerProcess
-    participant Child as Worker Impl
-
-    User->>Handle: start(spec)
-    Handle->>Runtime: spawn runtime
-    Runtime->>Worker: spawn workers
-    Worker->>Child: initialize()
-    Worker->>Child: run()
-    
-    Note over Child: Worker crashes
-    
-    Child-->>Worker: Error
-    Worker->>Runtime: ChildTerminated
-    Runtime->>Runtime: check RestartPolicy
-    Runtime->>Runtime: check RestartIntensity
-    Runtime->>Runtime: apply RestartStrategy
-    Runtime->>Worker: spawn new worker
-    Worker->>Child: initialize()
-    Worker->>Child: run()
-```
-
-## Restart Strategy Behavior
-
-```mermaid
-graph TB
-    subgraph "OneForOne Strategy"
-        direction LR
-        W1[Worker 1]
-        W2[Worker 2 ❌]
-        W3[Worker 3]
-        W2_new[Worker 2 🔄]
-        W2 -.->|restart only| W2_new
-    end
-
-    subgraph "OneForAll Strategy"
-        direction LR
-        W4[Worker 1 🔄]
-        W5[Worker 2 ❌]
-        W6[Worker 3 🔄]
-        W5 -.->|restart all| W4
-        W5 -.->|restart all| W6
-    end
-
-    subgraph "RestForOne Strategy"
-        direction LR
-        W7[Worker 1]
-        W8[Worker 2 ❌]
-        W9[Worker 3 🔄]
-        W8 -.->|restart self| W8
-        W8 -.->|restart after| W9
-    end
-```
-
-## Distributed Supervision
-
-```mermaid
-graph TB
-    subgraph "Process 1: US-West Region"
-        SV1[SupervisorHandle]
-        RT1[SupervisorRuntime]
-        SVR1[SupervisorServer<br/>Unix Socket]
-        W1[IoT Device 1]
-        W2[IoT Device 2]
-        
-        SV1 --> RT1
-        RT1 --> W1
-        RT1 --> W2
-        SV1 --> SVR1
-    end
-
-    subgraph "Process 2: EU-West Region"
-        SV2[SupervisorHandle]
-        RT2[SupervisorRuntime]
-        SVR2[SupervisorServer<br/>Unix Socket]
-        W3[IoT Device 3]
-        W4[IoT Device 4]
-        
-        SV2 --> RT2
-        RT2 --> W3
-        RT2 --> W4
-        SV2 --> SVR2
-    end
-
-    subgraph "Process 3: Cluster Control"
-        CC[Cluster Controller]
-        RH1[RemoteSupervisorHandle]
-        RH2[RemoteSupervisorHandle]
-        
-        CC --> RH1
-        CC --> RH2
-    end
-
-    RH1 -.->|which_children<br/>terminate_child<br/>shutdown| SVR1
-    RH2 -.->|which_children<br/>terminate_child<br/>shutdown| SVR2
-```
-
-## Channel Communication Pattern
-
-```mermaid
-graph LR
-    subgraph "SupervisorRuntime"
-        control_rx[control_rx<br/>Command Receiver]
-        control_tx[control_tx<br/>Command Sender Clone]
-    end
-
-    subgraph "External API"
-        handle[SupervisorHandle<br/>control_tx clone]
-    end
-
-    subgraph "Workers"
-        wp1[WorkerProcess 1<br/>control_tx clone]
-        wp2[WorkerProcess 2<br/>control_tx clone]
-        wp3[WorkerProcess 3<br/>control_tx clone]
-    end
-
-    handle -->|StartChild| control_rx
-    handle -->|TerminateChild| control_rx
-    handle -->|WhichChildren| control_rx
-    handle -->|Shutdown| control_rx
-    
-    wp1 -->|ChildTerminated| control_rx
-    wp2 -->|ChildTerminated| control_rx
-    wp3 -->|ChildTerminated| control_rx
-    
-    control_rx -->|processes| control_tx
-```
-
-## Restart Intensity Tracking
+## Worker lifecycle
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Normal: Supervisor starts
-    Normal --> Tracking: Child fails
-    Tracking --> Normal: Restart successful<br/>(under limit)
-    Tracking --> ShuttingDown: Too many restarts<br/>(intensity exceeded)
-    ShuttingDown --> [*]: Supervisor terminates
-    
-    note right of Tracking
-        RestartTracker maintains
-        time-windowed restart history
-        Default: 3 restarts / 5 seconds
-    end note
+    [*] --> Initializing: factory builds worker
+    Initializing --> Running: initialize Ok
+    Initializing --> Exited: initialize Err or panic
+    Running --> Exited: run returns or panics
+    Running --> Stopping: ShutdownSignal
+    Stopping --> Exited: shutdown hook runs
+    Stopping --> Killed: timeout or BrutalKill
+    Exited --> [*]: ChildTerminated sent
+    Killed --> [*]: reported by the supervisor
 ```
 
-## Worker Lifecycle
+Every call into user code is wrapped so a panic becomes an error. `initialize`, `run` and `shutdown`
+run on the worker's task; the factory runs on the supervisor's task, and a panic there fails only that
+child's start.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Created: Factory creates worker
-    Created --> Initializing: WorkerProcess spawn
-    Initializing --> Running: initialize succeeds
-    Initializing --> Failed: initialize fails
-    Running --> Completed: run returns Ok
-    Running --> Failed: run returns Err
-    Completed --> ShuttingDown: Normal exit
-    Failed --> ShuttingDown: Abnormal exit
-    ShuttingDown --> Terminated: shutdown called
-    Terminated --> [*]
-    
-    Failed --> Restarting: RestartPolicy applies
-    Restarting --> Created: Create new instance
-```
+## Exit handling
 
-## Start-Link Initialization
+Each started child gets a unique instance number, carried by its exit report. The runtime acts only on
+reports about the current instance of a child; reports about an instance it has already stopped or
+replaced are recognised as stale. This keeps two failures that arrive together from triggering two
+restart rounds.
 
 ```mermaid
 sequenceDiagram
-    participant Supervisor
-    participant WorkerProcess
-    participant Worker
+    participant W as Worker (instance 7)
+    participant R as Runtime
+    participant D as decide_restart
 
-    Supervisor->>WorkerProcess: spawn worker
-    WorkerProcess->>Worker: initialize()
-    
-    alt Initialization Success
-        Worker-->>WorkerProcess: Ok(())
-        WorkerProcess->>Supervisor: child ready
-        WorkerProcess->>Worker: run()
-    else Initialization Failure
-        Worker-->>WorkerProcess: Err
-        WorkerProcess->>Supervisor: child failed (not started)
-        Note over Supervisor: Apply restart policy
-    end
+    W->>R: ChildTerminated(id, 7, Abnormal)
+    R->>R: is 7 the current instance of id?
+    R->>D: policy, reason, intensity, backoff
+    D-->>R: Restart / Drop / Escalate / Ignore
+    R->>R: apply strategy, respawn as instance 8
 ```
 
-## Mailbox Communication
+Every termination is reported exactly once: a child that exits on its own reports itself; a child
+the supervisor stops is reported by the supervisor, which then silences the child's own report; a
+killed child sends no report.
+
+## Shutdown
+
+Children stopped together, on supervisor shutdown or a `OneForAll` / `RestForOne` restart, are stopped
+in reverse start order by default, or all at once with `ShutdownOrder::Concurrent`. Each worker is
+sent its `ShutdownSignal` and given its own `Shutdown` setting; nested supervisors stop their own
+children first. `SupervisorHandle::shutdown` returns once the whole tree has stopped.
+
+## Remote control
 
 ```mermaid
-graph TB
-    subgraph "Worker Pool Pattern"
-        Producer[Producer]
-        SharedMB[Arc&lt;Mutex&lt;Mailbox&gt;&gt;]
-        W1[Worker 1]
-        W2[Worker 2]
-        W3[Worker 3]
-        
-        Producer -->|send| SharedMB
-        SharedMB -->|recv| W1
-        SharedMB -->|recv| W2
-        SharedMB -->|recv| W3
-    end
+sequenceDiagram
+    participant C as RemoteSupervisorHandle
+    participant S as SupervisorServer
 
-    subgraph "Peer-to-Peer Pattern"
-        WA[Worker A]
-        MBA[Mailbox A]
-        WB[Worker B]
-        MBB[Mailbox B]
-        
-        WA -->|send| MBB
-        MBB -->|recv| WB
-        WB -->|send| MBA
-        MBA -->|recv| WA
+    C->>S: ClientHello(magic, version, nonce_c)
+    alt no cookie
+        S-->>C: Welcome
+    else cookie configured
+        S-->>C: Challenge(nonce_s, HMAC(cookie, nonce_c))
+        C->>S: ClientProof(HMAC(cookie, nonce_s))
+        S-->>C: Accepted / Rejected
+    end
+    loop on one connection
+        C->>S: RemoteCommand
+        S-->>C: RemoteResponse
     end
 ```
+
+Frames are length-prefixed rkyv archives, validated before use and capped at 10 MB. A server on a
+different protocol version answers `Unsupported`. A client handle keeps its connection open and
+retries once on a fresh connection if the old one was closed before any reply arrived.
+
+## Mailboxes
+
+A mailbox is a tokio channel whose receiving end is shared behind a mutex. Clones of a `Mailbox` read
+from the same queue, so a worker's factory can hand the same mailbox to every instance it builds, and
+several workers can share one mailbox as a pool. `MailboxHandle::call` sends a message carrying a
+oneshot `Reply` and waits for the answer.
