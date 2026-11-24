@@ -7,6 +7,7 @@
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use std::sync::Arc;
 
 use crate::distributed::{RemoteSupervisorHandle, SupervisorAddress};
 
@@ -49,7 +50,9 @@ impl PySupervisorAddress {
 /// Python-facing remote supervisor handle for distributed supervision
 #[pyclass(name = "RemoteSupervisorHandle")]
 pub struct PyRemoteSupervisorHandle {
-    inner: RemoteSupervisorHandle,
+    /// Shared rather than cloned per call: a clone opens its own connection,
+    /// and reusing one connection is what keeps repeated calls cheap.
+    inner: Arc<RemoteSupervisorHandle>,
 }
 
 #[pymethods]
@@ -58,7 +61,7 @@ impl PyRemoteSupervisorHandle {
     fn connect_tcp(addr: String) -> Self {
         // No I/O happens here: each command opens its own connection.
         PyRemoteSupervisorHandle {
-            inner: RemoteSupervisorHandle::tcp(addr),
+            inner: Arc::new(RemoteSupervisorHandle::tcp(addr)),
         }
     }
 
@@ -67,18 +70,18 @@ impl PyRemoteSupervisorHandle {
     fn connect_unix(path: String) -> Self {
         // No I/O happens here: each command opens its own connection.
         PyRemoteSupervisorHandle {
-            inner: RemoteSupervisorHandle::unix(path),
+            inner: Arc::new(RemoteSupervisorHandle::unix(path)),
         }
     }
 
     fn shutdown(&self, py: Python<'_>) -> PyResult<()> {
-        let handle = self.inner.clone();
+        let handle = Arc::clone(&self.inner);
         block_on_without_gil(py, async move { handle.shutdown().await })
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to shutdown: {e}")))
     }
 
     fn which_children(&self, py: Python<'_>) -> PyResult<Vec<PyChildInfo>> {
-        let handle = self.inner.clone();
+        let handle = Arc::clone(&self.inner);
         let result = block_on_without_gil(py, async move { handle.which_children().await });
 
         match result {
@@ -90,7 +93,7 @@ impl PyRemoteSupervisorHandle {
     }
 
     fn terminate_child(&self, child_id: String, py: Python<'_>) -> PyResult<()> {
-        let handle = self.inner.clone();
+        let handle = Arc::clone(&self.inner);
         block_on_without_gil(py, async move { handle.terminate_child(&child_id).await })
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to terminate child: {e}")))
     }

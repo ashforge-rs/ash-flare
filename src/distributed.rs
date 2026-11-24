@@ -100,20 +100,47 @@ pub struct SupervisorStatus {
     pub uptime_secs: u64,
 }
 
-/// Handle to communicate with a remote supervisor
-#[derive(Clone)]
+/// Handle to communicate with a remote supervisor.
+///
+/// The handle opens a connection on its first command and reuses it for the
+/// ones after, so repeated commands do not pay for a new connection each time.
+/// Commands on one handle run one at a time; each clone gets its own
+/// connection, so give concurrent tasks their own clone.
+///
+/// If a reused connection turns out to be dead (for example because the
+/// server restarted), the command is retried once on a fresh connection. That
+/// only happens when the failure came before any part of the reply arrived.
 pub struct RemoteSupervisorHandle {
     address: SupervisorAddress,
+    connection: tokio::sync::Mutex<Option<Connection>>,
+}
+
+impl Clone for RemoteSupervisorHandle {
+    /// The clone talks to the same address over its own connection.
+    fn clone(&self) -> Self {
+        Self::new(self.address.clone())
+    }
+}
+
+impl fmt::Debug for RemoteSupervisorHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteSupervisorHandle")
+            .field("address", &self.address)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RemoteSupervisorHandle {
     /// Creates a handle to a remote supervisor.
     ///
-    /// No connection is made here: each command opens its own connection, so
-    /// an unreachable address surfaces as an error from the first command.
+    /// No connection is made here; the first command opens one, so an
+    /// unreachable address surfaces as an error from that command.
     #[must_use]
     pub fn new(address: SupervisorAddress) -> Self {
-        Self { address }
+        Self {
+            address,
+            connection: tokio::sync::Mutex::new(None),
+        }
     }
 
     /// Creates a handle to a supervisor listening on TCP `addr` (`host:port`).
@@ -143,24 +170,28 @@ impl RemoteSupervisorHandle {
         &self,
         cmd: RemoteCommand,
     ) -> Result<RemoteResponse, DistributedError> {
-        match &self.address {
-            SupervisorAddress::Tcp(addr) => {
-                let mut stream = TcpStream::connect(addr).await?;
-                send_message(&mut stream, &cmd).await?;
-                receive_message(&mut stream).await
+        let mut slot = self.connection.lock().await;
+
+        if let Some(connection) = slot.as_mut() {
+            match connection.round_trip(&cmd).await {
+                Ok(response) => return Ok(response),
+                // The reused connection was already dead and the server never
+                // started replying, so sending again cannot run it twice.
+                Err(RoundTripError::BeforeReply(_)) => *slot = None,
+                Err(RoundTripError::Failed(error)) => {
+                    *slot = None;
+                    return Err(error);
+                }
             }
-            #[cfg(unix)]
-            SupervisorAddress::Unix(path) => {
-                let mut stream = UnixStream::connect(path).await?;
-                send_message(&mut stream, &cmd).await?;
-                receive_message(&mut stream).await
-            }
-            #[cfg(not(unix))]
-            SupervisorAddress::Unix(_) => Err(DistributedError::Io(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "Unix sockets are not supported on this platform",
-            ))),
         }
+
+        let mut connection = Connection::open(&self.address).await?;
+        let response = connection
+            .round_trip(&cmd)
+            .await
+            .map_err(RoundTripError::into_inner)?;
+        *slot = Some(connection);
+        Ok(response)
     }
 
     /// Shutdown the remote supervisor
@@ -283,6 +314,9 @@ impl SupervisorServer {
         loop {
             let (mut stream, peer) = listener.accept().await?;
             tracing::debug!(peer = ?peer, "new connection");
+            // Replies are written in one go; do not hold them back waiting
+            // for an ACK (Nagle), which stalls request/response traffic.
+            let _nodelay = stream.set_nodelay(true);
             let handle = Arc::clone(&self.handle);
 
             tokio::spawn(async move {
@@ -293,6 +327,7 @@ impl SupervisorServer {
         }
     }
 
+    /// Serves commands on one connection until the client closes it.
     async fn handle_connection<S>(
         stream: &mut S,
         handle: Arc<SupervisorHandle>,
@@ -300,10 +335,18 @@ impl SupervisorServer {
     where
         S: AsyncReadExt + AsyncWriteExt + Unpin,
     {
-        let command: RemoteCommand = receive_message(stream).await?;
-        let response = Self::process_command(command, &handle).await;
-        send_message(stream, &response).await?;
-        Ok(())
+        loop {
+            let command: RemoteCommand = match receive_message(stream).await {
+                Ok(command) => command,
+                // The client closed the connection between commands.
+                Err(FrameError::NotStarted(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(());
+                }
+                Err(e) => return Err(e.into_inner()),
+            };
+            let response = Self::process_command(command, &handle).await;
+            send_message(stream, &response).await?;
+        }
     }
 
     async fn process_command(command: RemoteCommand, handle: &SupervisorHandle) -> RemoteResponse {
@@ -357,8 +400,12 @@ where
     let len = u32::try_from(encoded.len())
         .map_err(|_| DistributedError::MessageTooLarge(encoded.len()))?;
 
-    stream.write_all(&len.to_be_bytes()).await?;
-    stream.write_all(&encoded).await?;
+    // One write per frame: a separate small write for the length prefix can
+    // be held back by Nagle's algorithm until the peer ACKs it.
+    let mut frame = Vec::with_capacity(encoded.len().saturating_add(4));
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(&encoded);
+    stream.write_all(&frame).await?;
     stream.flush().await?;
 
     Ok(())
@@ -369,7 +416,7 @@ where
 /// The payload arrives from a socket and is therefore untrusted: the archive is
 /// validated with bytecheck before access, so a malformed or hostile frame
 /// surfaces as [`DistributedError::Decode`] rather than undefined behaviour.
-async fn receive_message<S, T>(stream: &mut S) -> Result<T, DistributedError>
+async fn receive_message<S, T>(stream: &mut S) -> Result<T, FrameError>
 where
     S: AsyncReadExt + Unpin,
     T: Archive,
@@ -377,18 +424,126 @@ where
     T::Archived: RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
 {
     let mut len_bytes = [0u8; 4];
-    stream.read_exact(&mut len_bytes).await?;
+    // The first read tells "nothing arrived" apart from "the frame broke off".
+    let first = stream
+        .read(&mut len_bytes)
+        .await
+        .map_err(FrameError::NotStarted)?;
+    if first == 0 {
+        return Err(FrameError::NotStarted(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "connection closed",
+        )));
+    }
+
+    let failed = |e: std::io::Error| FrameError::Failed(DistributedError::Io(e));
+    stream
+        .read_exact(len_bytes.get_mut(first..).unwrap_or_default())
+        .await
+        .map_err(failed)?;
     let len = usize::try_from(u32::from_be_bytes(len_bytes))
-        .map_err(|_| DistributedError::MessageTooLarge(usize::MAX))?;
+        .map_err(|_| FrameError::Failed(DistributedError::MessageTooLarge(usize::MAX)))?;
 
     if len > MAX_MESSAGE_BYTES {
-        return Err(DistributedError::MessageTooLarge(len));
+        return Err(FrameError::Failed(DistributedError::MessageTooLarge(len)));
     }
 
     let mut buffer = vec![0u8; len];
-    stream.read_exact(&mut buffer).await?;
+    stream.read_exact(&mut buffer).await.map_err(failed)?;
 
-    rkyv::from_bytes::<T, rkyv::rancor::Error>(&buffer).map_err(DistributedError::Decode)
+    rkyv::from_bytes::<T, rkyv::rancor::Error>(&buffer)
+        .map_err(|e| FrameError::Failed(DistributedError::Decode(e)))
+}
+
+/// Why reading a frame failed.
+enum FrameError {
+    /// The connection closed or failed before any byte of the frame arrived.
+    NotStarted(std::io::Error),
+    /// The frame broke off part-way or could not be decoded.
+    Failed(DistributedError),
+}
+
+impl FrameError {
+    fn into_inner(self) -> DistributedError {
+        match self {
+            FrameError::NotStarted(e) => DistributedError::Io(e),
+            FrameError::Failed(e) => e,
+        }
+    }
+}
+
+/// Why a request/response exchange failed.
+enum RoundTripError {
+    /// Nothing of the reply arrived, so the server cannot have answered.
+    BeforeReply(DistributedError),
+    /// The exchange failed after the server may have acted on the command.
+    Failed(DistributedError),
+}
+
+impl RoundTripError {
+    fn into_inner(self) -> DistributedError {
+        match self {
+            RoundTripError::BeforeReply(e) | RoundTripError::Failed(e) => e,
+        }
+    }
+}
+
+/// An open connection to a remote supervisor.
+enum Connection {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(UnixStream),
+}
+
+impl Connection {
+    async fn open(address: &SupervisorAddress) -> Result<Self, DistributedError> {
+        match address {
+            SupervisorAddress::Tcp(addr) => {
+                let stream = TcpStream::connect(addr).await?;
+                // Requests are written in one go; do not hold them back
+                // waiting for an ACK.
+                stream.set_nodelay(true)?;
+                Ok(Connection::Tcp(stream))
+            }
+            #[cfg(unix)]
+            SupervisorAddress::Unix(path) => Ok(Connection::Unix(UnixStream::connect(path).await?)),
+            #[cfg(not(unix))]
+            SupervisorAddress::Unix(_) => Err(DistributedError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Unix sockets are not supported on this platform",
+            ))),
+        }
+    }
+
+    async fn round_trip(&mut self, cmd: &RemoteCommand) -> Result<RemoteResponse, RoundTripError> {
+        match self {
+            Connection::Tcp(stream) => round_trip(stream, cmd).await,
+            #[cfg(unix)]
+            Connection::Unix(stream) => round_trip(stream, cmd).await,
+        }
+    }
+}
+
+/// Sends one command and reads its reply.
+async fn round_trip<S>(
+    stream: &mut S,
+    cmd: &RemoteCommand,
+) -> Result<RemoteResponse, RoundTripError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    send_message(stream, cmd).await.map_err(|e| match e {
+        // Writing failed: the server never received a whole command.
+        DistributedError::Io(_) => RoundTripError::BeforeReply(e),
+        other => RoundTripError::Failed(other),
+    })?;
+
+    receive_message(stream)
+        .await
+        .map_err(|frame_error| match frame_error {
+            FrameError::NotStarted(e) => RoundTripError::BeforeReply(DistributedError::Io(e)),
+            FrameError::Failed(e) => RoundTripError::Failed(e),
+        })
 }
 
 /// Errors that can occur in distributed operations
