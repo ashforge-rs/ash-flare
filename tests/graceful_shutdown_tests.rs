@@ -382,3 +382,91 @@ async fn children_share_one_shutdown_timeout() {
         timeout * 3
     );
 }
+
+/// A `RestForOne` restart stops the affected siblings together, so restarting
+/// them takes about one cleanup rather than one per sibling.
+#[tokio::test]
+async fn rest_for_one_stops_affected_siblings_together() {
+    use ash_flare::{RestartBackoff, RestartStrategy};
+
+    /// Fails 50ms into its first run, then stays up.
+    struct CrashOnce {
+        starts: Arc<AtomicUsize>,
+    }
+    impl Worker for CrashOnce {
+        type Error = std::io::Error;
+
+        async fn run(&mut self) -> Result<(), Self::Error> {
+            if self.starts.fetch_add(1, Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                return Err(std::io::Error::other("first run fails"));
+            }
+            std::future::pending().await
+        }
+    }
+
+    /// Counts its starts and needs 100ms to clean up.
+    struct SlowSibling {
+        starts: Arc<AtomicUsize>,
+        shutdown: ShutdownSignal,
+    }
+    impl Worker for SlowSibling {
+        type Error = std::io::Error;
+
+        async fn run(&mut self) -> Result<(), Self::Error> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            self.shutdown.cancelled().await;
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> Result<(), Self::Error> {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(())
+        }
+    }
+
+    let crasher_starts = Arc::new(AtomicUsize::new(0));
+    let crasher = Arc::clone(&crasher_starts);
+    let mut spec = SupervisorSpec::new("root")
+        .with_restart_strategy(RestartStrategy::RestForOne)
+        .with_restart_backoff(RestartBackoff::none())
+        .with_worker(
+            "crasher",
+            move || CrashOnce {
+                starts: Arc::clone(&crasher),
+            },
+            RestartPolicy::Permanent,
+        );
+
+    let siblings: Vec<Arc<AtomicUsize>> = (0..4).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+    for (i, starts) in siblings.iter().enumerate() {
+        let starts = Arc::clone(starts);
+        spec = spec.with_worker(
+            format!("sibling-{i}"),
+            move |shutdown| SlowSibling {
+                starts: Arc::clone(&starts),
+                shutdown,
+            },
+            RestartPolicy::Permanent,
+        );
+    }
+
+    let handle = SupervisorHandle::start(spec);
+    // Crash at ~50ms. Stopped together, every sibling is back by ~150ms; one
+    // after another, the last would only be back at ~450ms.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let restarted: Vec<usize> = siblings.iter().map(|s| s.load(Ordering::SeqCst)).collect();
+    assert_eq!(
+        crasher_starts.load(Ordering::SeqCst),
+        2,
+        "crasher restarted once"
+    );
+    assert_eq!(
+        restarted,
+        vec![2; 4],
+        "every sibling restarted once by 300ms"
+    );
+
+    handle.shutdown().await.expect("shutdown");
+}

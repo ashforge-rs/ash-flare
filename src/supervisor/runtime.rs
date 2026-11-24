@@ -508,10 +508,13 @@ impl SupervisorRuntime {
             "restarting from position (rest_for_one)"
         );
 
-        let mut kept = Vec::new();
-        for mut child in self.children.split_off(position) {
-            child.shutdown(self.shutdown_timeout).await;
+        // Stop the affected children together, then start them again in their
+        // original order.
+        let mut affected = self.children.split_off(position);
+        stop_all(&mut affected, self.shutdown_timeout).await;
 
+        let mut kept = Vec::with_capacity(affected.len());
+        for mut child in affected {
             if Self::leaves_supervision(&child) {
                 tracing::debug!(
                     supervisor = %self.name,

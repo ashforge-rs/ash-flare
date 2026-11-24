@@ -120,7 +120,8 @@ impl SupervisorSpec {
     /// a worker that returns from `run` within this window also gets its
     /// [`shutdown`](crate::Worker::shutdown) hook run. A worker that ignores the
     /// signal is aborted and does **not** get the hook. When several children
-    /// stop together (supervisor shutdown or a `OneForAll` restart) they share
+    /// stop together (supervisor shutdown, or a `OneForAll` or `RestForOne`
+    /// restart) they share
     /// one timeout instead of each waiting in turn. Defaults to 5 seconds;
     /// `Duration::ZERO` aborts immediately.
     #[must_use]
