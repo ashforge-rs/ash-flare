@@ -4,7 +4,10 @@ use ash_flare::{
 };
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::time::sleep;
 
 // ============================================================================
@@ -58,6 +61,37 @@ impl Worker for CleanupWorker {
 
     async fn shutdown(&mut self) -> Result<(), Self::Error> {
         sleep(Duration::from_millis(5)).await;
+        Ok(())
+    }
+}
+
+/// Fails as soon as it starts, signalling `done` once it has been started
+/// `target` times. Used to drive a tight crash-restart loop.
+struct Crasher {
+    starts: Arc<AtomicUsize>,
+    target: usize,
+    done: Arc<Notify>,
+}
+impl Worker for Crasher {
+    type Error = std::io::Error;
+
+    async fn run(&mut self) -> Result<(), Self::Error> {
+        if self.starts.fetch_add(1, Ordering::SeqCst) + 1 == self.target {
+            self.done.notify_one();
+        }
+        Err(std::io::Error::other("crash"))
+    }
+}
+
+/// Idles until stopped; restarted alongside a crasher under `OneForAll`.
+struct Idler {
+    shutdown: ShutdownSignal,
+}
+impl Worker for Idler {
+    type Error = std::io::Error;
+
+    async fn run(&mut self) -> Result<(), Self::Error> {
+        self.shutdown.cancelled().await;
         Ok(())
     }
 }
@@ -162,6 +196,65 @@ fn bench_cooperative_shutdown(c: &mut Criterion) {
                     });
             },
         );
+    }
+
+    group.finish();
+}
+
+/// Time for a supervisor to carry out `RESTARTS` restarts of a crashing child,
+/// with no backoff and no fixed sleeps, so the supervisor's own restart path
+/// (bookkeeping, respawn, task spawn) is what gets measured.
+fn bench_restart_loop(c: &mut Criterion) {
+    const RESTARTS: usize = 5_000;
+
+    let mut group = c.benchmark_group("restart_loop");
+    group.sample_size(30);
+    group.measurement_time(Duration::from_secs(15));
+
+    for (label, strategy, siblings) in [
+        ("one_for_one", RestartStrategy::OneForOne, 0),
+        ("one_for_all_10", RestartStrategy::OneForAll, 9),
+    ] {
+        group.bench_function(label, |b| {
+            b.to_async(tokio::runtime::Runtime::new().unwrap())
+                .iter_custom(|iters| async move {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let starts = Arc::new(AtomicUsize::new(0));
+                        let done = Arc::new(Notify::new());
+                        let (s, d) = (Arc::clone(&starts), Arc::clone(&done));
+
+                        let mut spec = SupervisorSpec::new("bench")
+                            .with_restart_strategy(strategy)
+                            .with_restart_backoff(ash_flare::RestartBackoff::none())
+                            .with_restart_intensity(RestartIntensity::new(RESTARTS * 2, 60));
+                        for i in 0..siblings {
+                            spec = spec.with_worker(
+                                format!("idler-{i}"),
+                                |shutdown| Idler { shutdown },
+                                RestartPolicy::Permanent,
+                            );
+                        }
+                        spec = spec.with_worker(
+                            "crasher",
+                            move || Crasher {
+                                starts: Arc::clone(&s),
+                                target: RESTARTS,
+                                done: Arc::clone(&d),
+                            },
+                            RestartPolicy::Permanent,
+                        );
+
+                        let started = std::time::Instant::now();
+                        let handle = SupervisorHandle::start(spec);
+                        done.notified().await;
+                        total += started.elapsed();
+
+                        let _ = handle.shutdown().await;
+                    }
+                    total
+                });
+        });
     }
 
     group.finish();
@@ -396,6 +489,7 @@ criterion_group!(
     bench_supervisor_startup,
     bench_supervisor_shutdown,
     bench_cooperative_shutdown,
+    bench_restart_loop,
     bench_nested_supervisors,
     bench_stateful_context_operations,
     bench_stateful_supervisor_startup,
