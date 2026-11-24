@@ -1,7 +1,7 @@
 //! Supervisor handle - public API for interacting with supervisors
 
 use super::error::SupervisorError;
-use super::runtime::{SupervisorCommand, SupervisorRuntime};
+use super::runtime::{StatusSnapshot, SupervisorCommand, SupervisorRuntime};
 use super::spec::SupervisorSpec;
 use crate::restart::{RestartPolicy, RestartStrategy};
 use crate::types::{ChildId, ChildInfo};
@@ -215,6 +215,12 @@ impl SupervisorHandle {
     /// Returns an error if the supervisor is shutting down.
     pub async fn restart_strategy(&self) -> Result<RestartStrategy, SupervisorError> {
         self.request(|respond_to| SupervisorCommand::GetRestartStrategy { respond_to })
+            .await
+    }
+
+    /// Child count, restart strategy and uptime, fetched in one round trip.
+    pub(crate) async fn status_snapshot(&self) -> Result<StatusSnapshot, SupervisorError> {
+        self.request(|respond_to| SupervisorCommand::GetStatus { respond_to })
             .await
     }
 

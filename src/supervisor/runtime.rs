@@ -36,6 +36,10 @@ pub(crate) enum SupervisorCommand {
     GetUptime {
         respond_to: oneshot::Sender<Duration>,
     },
+    /// Everything a status report needs, in one round trip.
+    GetStatus {
+        respond_to: oneshot::Sender<StatusSnapshot>,
+    },
     ChildTerminated {
         id: ChildId,
         reason: ChildExitReason,
@@ -52,6 +56,14 @@ pub(crate) enum SupervisorCommand {
     Shutdown {
         respond_to: Option<oneshot::Sender<()>>,
     },
+}
+
+/// A point-in-time summary of a supervisor, answered by a single command.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StatusSnapshot {
+    pub children_count: usize,
+    pub restart_strategy: RestartStrategy,
+    pub uptime: Duration,
 }
 
 /// Whether the runtime loop should keep serving commands or terminate.
@@ -144,6 +156,13 @@ impl SupervisorRuntime {
                 }
                 SupervisorCommand::GetRestartStrategy { respond_to } => {
                     let _send = respond_to.send(self.restart_strategy);
+                }
+                SupervisorCommand::GetStatus { respond_to } => {
+                    let _send = respond_to.send(StatusSnapshot {
+                        children_count: self.children.len(),
+                        restart_strategy: self.restart_strategy,
+                        uptime: self.created_at.elapsed(),
+                    });
                 }
                 SupervisorCommand::GetUptime { respond_to } => {
                     let uptime = self.created_at.elapsed();

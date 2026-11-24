@@ -321,16 +321,15 @@ impl SupervisorServer {
                 Err(e) => RemoteResponse::Error(e.to_string()),
             },
             RemoteCommand::Status => {
-                let status = async {
-                    Ok::<_, crate::SupervisorError>(SupervisorStatus {
+                // One request to the supervisor rather than three, which also
+                // makes the fields consistent with each other.
+                match handle.status_snapshot().await {
+                    Ok(snapshot) => RemoteResponse::Status(SupervisorStatus {
                         name: handle.name().to_owned(),
-                        children_count: handle.which_children().await?.len(),
-                        restart_strategy: handle.restart_strategy().await?,
-                        uptime_secs: handle.uptime().await?.as_secs(),
-                    })
-                };
-                match status.await {
-                    Ok(current) => RemoteResponse::Status(current),
+                        children_count: snapshot.children_count,
+                        restart_strategy: snapshot.restart_strategy,
+                        uptime_secs: snapshot.uptime.as_secs(),
+                    }),
                     Err(e) => RemoteResponse::Error(e.to_string()),
                 }
             }
