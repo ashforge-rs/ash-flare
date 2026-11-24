@@ -5,7 +5,6 @@ use crate::types::ShutdownSignal;
 use crate::worker::Worker;
 use pyo3::prelude::*;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Extra arguments passed to a Python worker callable when it is invoked.
 #[derive(Clone)]
@@ -39,10 +38,8 @@ pub struct PyWorker {
     pub(crate) callable: Arc<PyWorkerFn>,
     /// What to pass to the callable. Stateful supervisors pass their context.
     pub(crate) args: PyWorkerArgs,
-    /// Set when the supervisor asks this worker to stop. Python workers can
-    /// poll it via the `should_stop` argument they are handed.
-    pub(crate) cancelled: Arc<AtomicBool>,
-    /// Cooperative shutdown signal from the supervisor.
+    /// Cooperative shutdown signal from the supervisor. Python workers poll it
+    /// through the `should_stop` argument they are handed.
     pub(crate) shutdown: ShutdownSignal,
     /// The in-flight Python call. A `spawn_blocking` task cannot be cancelled,
     /// so this is kept across a cancellation of `run` and joined in `shutdown`.
@@ -56,7 +53,6 @@ impl PyWorker {
             name,
             callable,
             args: PyWorkerArgs::None,
-            cancelled: Arc::new(AtomicBool::new(false)),
             shutdown,
             body: None,
         }
@@ -73,7 +69,6 @@ impl PyWorker {
             name,
             callable,
             args: PyWorkerArgs::Context(context),
-            cancelled: Arc::new(AtomicBool::new(false)),
             shutdown,
             body: None,
         }
@@ -86,27 +81,29 @@ impl PyWorker {
 #[pyclass(name = "ShouldStop", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyShouldStop {
-    flag: Arc<AtomicBool>,
+    /// Read directly, so no task is needed to mirror it into a flag: the
+    /// worker body runs on a blocking thread and simply polls this.
+    signal: ShutdownSignal,
 }
 
 #[pymethods]
 impl PyShouldStop {
     /// Returns `True` once the supervisor has asked this worker to stop.
     fn is_set(&self) -> bool {
-        self.flag.load(Ordering::SeqCst)
+        self.signal.is_cancelled()
     }
 
     /// Alias for `is_set()`, so the object can be used as `if should_stop():`.
     fn __call__(&self) -> bool {
-        self.flag.load(Ordering::SeqCst)
+        self.is_set()
     }
 
     fn __bool__(&self) -> bool {
-        self.flag.load(Ordering::SeqCst)
+        self.is_set()
     }
 
     fn __repr__(&self) -> String {
-        format!("ShouldStop(set={})", self.flag.load(Ordering::SeqCst))
+        format!("ShouldStop(set={})", self.is_set())
     }
 }
 
@@ -117,24 +114,16 @@ impl Worker for PyWorker {
         let callable = Arc::clone(&self.callable);
         let name = self.name.clone();
         let args = self.args.clone();
-        let cancelled = Arc::clone(&self.cancelled);
-
-        // Watch for cooperative shutdown and raise the flag the Python worker
-        // polls. The worker body runs on a blocking thread that cannot be
-        // preempted, so a flag is the only way to ask it to stop.
+        // The worker body runs on a blocking thread that cannot be preempted,
+        // so polling this signal is the only way to ask it to stop.
         let signal = self.shutdown.clone();
-        let flag = Arc::clone(&self.cancelled);
-        let watcher = tokio::spawn(async move {
-            signal.cancelled().await;
-            flag.store(true, Ordering::SeqCst);
-        });
 
         // Run the Python callable on a blocking-pool thread. `spawn_blocking`
         // is used on its own here: spawning a bare OS thread as well would
         // double the per-worker thread cost for no benefit.
         self.body = Some(tokio::task::spawn_blocking(move || {
             Python::attach(|py| {
-                let should_stop = PyShouldStop { flag: cancelled };
+                let should_stop = PyShouldStop { signal };
                 let outcome = match &args {
                     PyWorkerArgs::None => {
                         call_with_optional_args(py, &callable, None, &should_stop)
@@ -164,8 +153,6 @@ impl Worker for PyWorker {
         let result = handle.await;
         self.body = None;
 
-        watcher.abort();
-
         match result {
             Ok(inner) => inner,
             Err(join_err) => Err(format!("worker task failed to run: {join_err}")),
@@ -186,10 +173,8 @@ impl Worker for PyWorker {
             return Ok(());
         };
 
-        // Raise the flag here too: the watcher task does it as well, but this
-        // does not depend on that task being scheduled first.
-        self.cancelled.store(true, Ordering::SeqCst);
-
+        // `run` is only cancelled once shutdown has been signalled, so the
+        // body already sees `should_stop` as set.
         let _joined = handle.await;
         Ok(())
     }

@@ -135,9 +135,13 @@ impl ShutdownSignal {
     }
 
     /// Returns `true` if shutdown has already been requested.
+    ///
+    /// Like [`cancelled`](Self::cancelled), this also reports `true` once the
+    /// supervisor side is gone, since nothing is left to supervise the worker.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        *self.rx.borrow()
+        // `has_changed` only errors when every sender has been dropped.
+        *self.rx.borrow() || self.rx.has_changed().is_err()
     }
 
     /// Resolves once shutdown has been requested.
@@ -339,5 +343,30 @@ impl WorkerContext {
 impl Default for WorkerContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShutdownSignal;
+
+    #[test]
+    fn is_cancelled_tracks_the_request_and_a_vanished_supervisor() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let signal = ShutdownSignal::new(rx);
+        assert!(!signal.is_cancelled());
+
+        tx.send(true).expect("receiver alive");
+        assert!(signal.is_cancelled(), "an explicit request is reported");
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let orphaned = ShutdownSignal::new(rx);
+        drop(tx);
+        assert!(
+            orphaned.is_cancelled(),
+            "with the supervisor side gone, the worker must be told to stop"
+        );
+
+        assert!(!ShutdownSignal::never().is_cancelled());
     }
 }
