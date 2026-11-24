@@ -241,27 +241,57 @@ impl WorkerProcess {
     /// Returns `true` if the worker stopped on its own (so its `shutdown` hook
     /// ran), `false` if it had to be aborted.
     pub(crate) async fn stop(&mut self, timeout: std::time::Duration) -> bool {
+        self.request_stop();
+        if timeout.is_zero() {
+            return self.abort().await;
+        }
+        self.stop_by(deadline_after(timeout)).await
+    }
+
+    /// Sends the cooperative shutdown signal without waiting for the worker.
+    ///
+    /// Signalling every child first and only then waiting lets them all wind
+    /// down at the same time instead of one after another.
+    pub(crate) fn request_stop(&self) {
+        // A send error means the task is already gone.
+        let _notified = self.shutdown_tx.send(true);
+    }
+
+    /// Aborts the worker's task outright; its `shutdown` hook does not run.
+    ///
+    /// Returns `true` if the worker had already stopped on its own.
+    pub(crate) async fn abort(&mut self) -> bool {
+        let Some(handle) = self.handle.take() else {
+            return true;
+        };
+        handle.abort();
+        let _join_result = handle.await;
+        false
+    }
+
+    /// Waits for a worker that was already sent [`request_stop`](Self::request_stop)
+    /// to finish, aborting it if it is still running at `deadline`. `None`
+    /// waits indefinitely.
+    ///
+    /// Returns `true` if the worker stopped on its own (so its `shutdown` hook
+    /// ran), `false` if it had to be aborted.
+    pub(crate) async fn stop_by(&mut self, deadline: Option<tokio::time::Instant>) -> bool {
         let Some(mut handle) = self.handle.take() else {
             return true;
         };
 
-        // Ask the worker to stop. A send error means the task is already gone.
-        let _notified = self.shutdown_tx.send(true);
+        let Some(at) = deadline else {
+            let _joined = (&mut handle).await;
+            return true;
+        };
 
-        if timeout.is_zero() {
-            handle.abort();
-            let _join_result = handle.await;
-            return false;
-        }
-
-        match tokio::time::timeout(timeout, &mut handle).await {
+        match tokio::time::timeout_at(at, &mut handle).await {
             Ok(_joined) => true,
             Err(_elapsed) => {
                 // The worker ignored the signal; drop it the hard way. Its
                 // `shutdown` hook does not run in this path.
                 tracing::warn!(
                     worker = %self.spec.id,
-                    timeout_ms = %timeout.as_millis(),
                     "worker did not stop within shutdown timeout, aborting"
                 );
                 handle.abort();
@@ -270,6 +300,12 @@ impl WorkerProcess {
             }
         }
     }
+}
+
+/// The instant `timeout` from now, or `None` if that is too far away to
+/// represent (an effectively unbounded timeout).
+pub(crate) fn deadline_after(timeout: std::time::Duration) -> Option<tokio::time::Instant> {
+    tokio::time::Instant::now().checked_add(timeout)
 }
 
 impl Drop for WorkerProcess {

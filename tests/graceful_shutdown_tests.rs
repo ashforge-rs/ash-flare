@@ -335,3 +335,50 @@ async fn shutdown_waits_for_the_whole_tree() {
     assert!(handle.is_stopped());
     assert!(handle.shutdown().await.is_err(), "already stopped");
 }
+
+/// Children are stopped together and share one shutdown timeout, so the total
+/// is bounded by the timeout rather than growing with the number of children.
+#[tokio::test]
+async fn children_share_one_shutdown_timeout() {
+    struct OverrunningCleanup;
+    impl Worker for OverrunningCleanup {
+        type Error = std::io::Error;
+
+        async fn run(&mut self) -> Result<(), Self::Error> {
+            std::future::pending().await
+        }
+
+        async fn shutdown(&mut self) -> Result<(), Self::Error> {
+            // Far longer than the timeout: the worker has to be aborted.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            Ok(())
+        }
+    }
+
+    let timeout = Duration::from_millis(200);
+    let mut spec = SupervisorSpec::new("root").with_shutdown_timeout(timeout);
+    for i in 0..3 {
+        spec = spec.with_worker(
+            format!("w{i}"),
+            || OverrunningCleanup,
+            RestartPolicy::Permanent,
+        );
+    }
+
+    let handle = SupervisorHandle::start(spec);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let started = std::time::Instant::now();
+    handle.shutdown().await.expect("shutdown");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= timeout,
+        "workers must get the full timeout, took {elapsed:?}"
+    );
+    assert!(
+        elapsed < timeout * 2,
+        "three overrunning workers must share one timeout (sequential would be {:?}), took {elapsed:?}",
+        timeout * 3
+    );
+}

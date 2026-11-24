@@ -1,6 +1,6 @@
 //! Supervisor runtime - internal state machine
 
-use super::child::Child;
+use super::child::{Child, stop_all};
 use super::error::SupervisorError;
 use super::handle::SupervisorHandle;
 use super::spec::{ChildSpec, SupervisorSpec};
@@ -436,10 +436,7 @@ impl SupervisorRuntime {
             "restarting all children (one_for_all)"
         );
 
-        // Shutdown all children
-        for child in &mut self.children {
-            child.shutdown(self.shutdown_timeout).await;
-        }
+        stop_all(&mut self.children, self.shutdown_timeout).await;
 
         let mut kept = Vec::with_capacity(self.children.len());
         for mut child in self.children.drain(..) {
@@ -537,14 +534,12 @@ impl SupervisorRuntime {
     }
 
     async fn shutdown_children(&mut self) {
-        for mut child in self.children.drain(..) {
-            let id = child.id().to_owned();
-            child.shutdown(self.shutdown_timeout).await;
-            tracing::debug!(
-                supervisor = %self.name,
-                child = %id,
-                "shut down child"
-            );
-        }
+        stop_all(&mut self.children, self.shutdown_timeout).await;
+        tracing::debug!(
+            supervisor = %self.name,
+            children = self.children.len(),
+            "shut down children"
+        );
+        self.children.clear();
     }
 }

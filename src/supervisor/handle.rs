@@ -163,8 +163,9 @@ impl SupervisorHandle {
 
     /// Shuts the supervisor tree down and waits until it has stopped.
     ///
-    /// Each child in turn is asked to stop and given the supervisor's shutdown
-    /// timeout to do so; nested supervisors are shut down the same way. When this returns, all `shutdown` hooks that were going to
+    /// Every child is asked to stop at once, and the children share one
+    /// shutdown timeout, so a slow cleanup in one child does not delay the
+    /// others. Nested supervisors are shut down the same way. When this returns, all `shutdown` hooks that were going to
     /// run have run.
     ///
     /// # Errors
@@ -172,17 +173,26 @@ impl SupervisorHandle {
     /// Returns [`SupervisorError::ShuttingDown`] if the supervisor had already
     /// stopped.
     pub async fn shutdown(&self) -> Result<(), SupervisorError> {
+        let done = self.begin_shutdown().ok_or_else(|| self.shutting_down())?;
+
+        // A dropped reply means the supervisor stopped on its own (it escalated)
+        // while this request was queued; it shut its children down on the way.
+        let _done = done.await;
+        Ok(())
+    }
+
+    /// Asks the supervisor to shut down without waiting for it.
+    ///
+    /// The returned receiver resolves once the tree has stopped. `None` means
+    /// the supervisor had already stopped.
+    pub(crate) fn begin_shutdown(&self) -> Option<oneshot::Receiver<()>> {
         let (done_tx, done_rx) = oneshot::channel();
         self.control_tx
             .send(SupervisorCommand::Shutdown {
                 respond_to: Some(done_tx),
             })
-            .map_err(|_| self.shutting_down())?;
-
-        // A dropped reply means the supervisor stopped on its own (it escalated)
-        // while this request was queued; it shut its children down on the way.
-        let _done = done_rx.await;
-        Ok(())
+            .ok()?;
+        Some(done_rx)
     }
 
     /// Returns the supervisor's name.

@@ -4,7 +4,7 @@ use super::handle::SupervisorHandle;
 use super::spec::SupervisorSpec;
 use crate::restart::RestartPolicy;
 use crate::types::ChildType;
-use crate::worker::WorkerProcess;
+use crate::worker::{WorkerProcess, deadline_after};
 use std::sync::Arc;
 
 /// Represents either a worker or a nested supervisor in the supervision tree
@@ -55,5 +55,37 @@ impl Child {
                 let _shutdown_result = handle.shutdown().await;
             }
         }
+    }
+}
+
+/// Stops every child in `children` at the same time.
+///
+/// All workers are signalled and all nested supervisors told to shut down
+/// before anything is waited on, and the workers share one deadline. Stopping
+/// them one after another would make the total time the *sum* of every child's
+/// cleanup (up to `timeout` per uncooperative worker) instead of the slowest.
+pub(crate) async fn stop_all(children: &mut [Child], timeout: std::time::Duration) {
+    let mut nested = Vec::new();
+    for child in children.iter_mut() {
+        match child {
+            Child::Worker(worker) => worker.request_stop(),
+            Child::Supervisor { handle, .. } => nested.push(handle.begin_shutdown()),
+        }
+    }
+
+    let deadline = deadline_after(timeout);
+    for child in children.iter_mut() {
+        if let Child::Worker(worker) = child {
+            let _graceful = if timeout.is_zero() {
+                worker.abort().await
+            } else {
+                worker.stop_by(deadline).await
+            };
+        }
+    }
+
+    // Nested supervisors apply their own shutdown timeout to their children.
+    for done in nested.into_iter().flatten() {
+        let _stopped = done.await;
     }
 }

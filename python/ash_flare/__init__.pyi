@@ -193,8 +193,8 @@ class SupervisorHandle:
     def shutdown(self) -> None:
         """Stop the tree and block until every worker has stopped.
 
-        Each worker gets the spec's shutdown timeout; one that ignores
-        ``should_stop`` is abandoned only once that timeout has elapsed.
+        Workers are stopped together and share the spec's shutdown timeout;
+        one that ignores ``should_stop`` is abandoned once it has elapsed.
         """
         ...
 
@@ -230,8 +230,8 @@ class StatefulSupervisorHandle:
     def shutdown(self) -> None:
         """Stop the tree and block until every worker has stopped.
 
-        Each worker gets the spec's shutdown timeout; one that ignores
-        ``should_stop`` is abandoned only once that timeout has elapsed.
+        Workers are stopped together and share the spec's shutdown timeout;
+        one that ignores ``should_stop`` is abandoned once it has elapsed.
         """
         ...
 

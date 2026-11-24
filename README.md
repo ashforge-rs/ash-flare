@@ -257,7 +257,8 @@ does not get the hook.
 - `with_worker_signal`, `start_child_with_signal` and
   `start_child_linked_with_signal` are gone: pass a `|signal| ...` factory to
   `with_worker`, `start_child` or `start_child_linked`.
-- `SupervisorHandle::shutdown` now waits until the tree has stopped.
+- `SupervisorHandle::shutdown` now waits until the tree has stopped. Children are stopped
+  together and share one shutdown timeout, rather than one after another.
 - `SupervisorHandle::uptime` returns a `Duration`.
 - `ChildInfo::restart_policy` is `None` for nested supervisors, as documented.
 - `SupervisorError` is `#[non_exhaustive]`, and its never-used `NoChildren` and
@@ -268,8 +269,9 @@ does not get the hook.
   never connecting) are replaced by the plain constructors `tcp` / `unix`.
 
 The Python API is unchanged, except that `SupervisorHandle.shutdown()` (and the
-stateful variant) now blocks until the tree has stopped. A worker that never
-checks `should_stop` keeps it waiting for the full shutdown timeout.
+stateful variant) now blocks until the tree has stopped. Workers stop together
+and share one shutdown timeout, so a worker that never checks `should_stop`
+keeps it waiting for that timeout.
 
 ## Documentation
 
