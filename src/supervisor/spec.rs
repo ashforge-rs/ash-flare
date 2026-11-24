@@ -365,6 +365,35 @@ impl SupervisorSpec {
         self.with_child(ChildSpec::new(id, factory).restart(restart_policy))
     }
 
+    /// Adds `size` identical workers with ids `{prefix}-0` to
+    /// `{prefix}-{size - 1}`. The factory receives each worker's index.
+    ///
+    /// Combined with a shared [`Mailbox`](crate::Mailbox), this makes a pool
+    /// in which each message goes to whichever worker is free.
+    #[must_use]
+    pub fn with_worker_pool<W, F>(
+        mut self,
+        prefix: &str,
+        size: usize,
+        factory: F,
+        restart_policy: RestartPolicy,
+    ) -> Self
+    where
+        W: crate::Worker,
+        F: Fn(usize) -> W + Send + Sync + 'static,
+    {
+        let shared = Arc::new(factory);
+        for index in 0..size {
+            let member = Arc::clone(&shared);
+            self = self.with_worker(
+                format!("{prefix}-{index}"),
+                move || member(index),
+                restart_policy,
+            );
+        }
+        self
+    }
+
     /// Adds a nested supervisor child to this supervisor specification.
     #[must_use]
     pub fn with_supervisor(mut self, supervisor: SupervisorSpec) -> Self {

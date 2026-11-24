@@ -146,6 +146,42 @@ impl SupervisorHandle {
             .await
     }
 
+    /// Starts a worker under an id the supervisor picks, like a child of OTP's
+    /// `simple_one_for_one` supervisor.
+    ///
+    /// The spec's id is used as a prefix: the child gets an id of the form
+    /// `{prefix}-{n}` that no current child uses, which is returned. Per-child
+    /// arguments are whatever the factory closure captures.
+    ///
+    /// ```
+    /// # use ash_flare::{ChildSpec, RestartPolicy, SupervisorHandle, SupervisorSpec, Worker};
+    /// # struct Conn(u16);
+    /// # impl Worker for Conn {
+    /// #     type Error = std::io::Error;
+    /// #     async fn run(&mut self) -> Result<(), Self::Error> { Ok(()) }
+    /// # }
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let handle = SupervisorHandle::start(SupervisorSpec::new("conns")).unwrap();
+    /// let port = 8080;
+    /// let id = handle
+    ///     .start_unique_child(ChildSpec::new("conn", move || Conn(port)).restart(RestartPolicy::Temporary))
+    ///     .await
+    ///     .unwrap();
+    /// assert_eq!(id, "conn-0");
+    /// # handle.shutdown().await.unwrap();
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supervisor is shutting down.
+    pub async fn start_unique_child(&self, child: ChildSpec) -> Result<ChildId, SupervisorError> {
+        let spec = child.worker;
+        self.request(|respond_to| SupervisorCommand::StartUniqueChild { spec, respond_to })
+            .await
+    }
+
     /// Dynamically starts a worker described by a full [`ChildSpec`].
     ///
     /// # Errors

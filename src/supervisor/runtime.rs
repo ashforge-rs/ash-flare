@@ -20,6 +20,11 @@ pub(crate) enum SupervisorCommand {
         spec: WorkerSpec,
         respond_to: oneshot::Sender<Result<ChildId, SupervisorError>>,
     },
+    /// Starts a child under a fresh id made from the spec's id as a prefix.
+    StartUniqueChild {
+        spec: WorkerSpec,
+        respond_to: oneshot::Sender<ChildId>,
+    },
     StartChildLinked {
         spec: WorkerSpec,
         timeout: Duration,
@@ -95,6 +100,8 @@ pub(crate) struct SupervisorRuntime {
     shutdown_timeout: Duration,
     shutdown_order: ShutdownOrder,
     auto_shutdown: AutoShutdown,
+    /// Next number to try when generating a child id from a prefix.
+    next_unique: u64,
     created_at: std::time::Instant,
     events: EventSender,
     /// Instances this supervisor stopped and already reported as terminated;
@@ -152,6 +159,7 @@ impl SupervisorRuntime {
             shutdown_timeout: spec.shutdown_timeout,
             shutdown_order: spec.shutdown_order,
             auto_shutdown: spec.auto_shutdown,
+            next_unique: 0,
             created_at: std::time::Instant::now(),
             events,
             silenced: HashSet::new(),
@@ -166,6 +174,17 @@ impl SupervisorRuntime {
                 SupervisorCommand::StartChild { spec, respond_to } => {
                     let result = self.handle_start_child(spec);
                     let _send = respond_to.send(result);
+                }
+                SupervisorCommand::StartUniqueChild {
+                    mut spec,
+                    respond_to,
+                } => {
+                    spec.id = self.unique_id(&spec.id);
+                    // The id was just checked to be free, so this cannot fail.
+                    let result = self.handle_start_child(spec);
+                    if let Ok(id) = result {
+                        let _send = respond_to.send(id);
+                    }
                 }
                 SupervisorCommand::StartChildLinked {
                     spec,
@@ -230,6 +249,17 @@ impl SupervisorRuntime {
 
         self.shutdown_children().await;
         ChildExitReason::Shutdown
+    }
+
+    /// A child id of the form `{prefix}-{n}` not used by any current child.
+    fn unique_id(&mut self, prefix: &str) -> Arc<str> {
+        loop {
+            let candidate = format!("{prefix}-{}", self.next_unique);
+            self.next_unique = self.next_unique.wrapping_add(1);
+            if !self.children.contains(&candidate) {
+                return Arc::from(candidate);
+            }
+        }
     }
 
     fn handle_start_child(&mut self, spec: WorkerSpec) -> Result<ChildId, SupervisorError> {
