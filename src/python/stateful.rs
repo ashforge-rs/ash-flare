@@ -20,7 +20,7 @@ use crate::types::{ChildType, ShutdownSignal, WorkerContext};
 use super::context::PyWorkerContext;
 use super::supervisor::ensure_unique_id;
 use super::types::{PyChildInfo, PyRestartIntensity, PyRestartPolicy, PyRestartStrategy};
-use super::worker::PyWorker;
+use super::worker::{PyWorker, PyWorkerFn};
 use super::{block_on_without_gil, duration_from_secs, ensure_callable, get_runtime};
 
 /// Python-facing stateful supervisor specification
@@ -82,7 +82,7 @@ impl PyStatefulSupervisorSpec {
 
         let policy = restart_policy.inner;
         let id_clone = id.clone();
-        let worker_fn_arc = Arc::new(worker_fn.clone_ref(py));
+        let worker_fn_arc = Arc::new(PyWorkerFn::new(py, worker_fn.clone_ref(py)));
 
         let context = self.context.clone();
 

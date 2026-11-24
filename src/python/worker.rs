@@ -16,10 +16,27 @@ pub(crate) enum PyWorkerArgs {
     Context(PyWorkerContext),
 }
 
+/// A worker callable together with the positional arity it accepts.
+///
+/// Reading the arity means a round of `inspect.signature` calls. It is done
+/// once, when the worker is registered, rather than on every start and restart.
+pub(crate) struct PyWorkerFn {
+    callable: Py<PyAny>,
+    /// `None` when the signature cannot be introspected.
+    arity: Option<Arity>,
+}
+
+impl PyWorkerFn {
+    pub(crate) fn new(py: Python<'_>, callable: Py<PyAny>) -> Self {
+        let arity = positional_arity(py, &callable);
+        Self { callable, arity }
+    }
+}
+
 /// Python-compatible wrapper for Worker that accepts Python callables
 pub struct PyWorker {
     pub(crate) name: String,
-    pub(crate) callable: Arc<Py<PyAny>>,
+    pub(crate) callable: Arc<PyWorkerFn>,
     /// What to pass to the callable. Stateful supervisors pass their context.
     pub(crate) args: PyWorkerArgs,
     /// Set when the supervisor asks this worker to stop. Python workers can
@@ -34,7 +51,7 @@ pub struct PyWorker {
 
 impl PyWorker {
     /// Builds a worker that calls `callable` with no extra arguments.
-    pub(crate) fn new(name: String, callable: Arc<Py<PyAny>>, shutdown: ShutdownSignal) -> Self {
+    pub(crate) fn new(name: String, callable: Arc<PyWorkerFn>, shutdown: ShutdownSignal) -> Self {
         Self {
             name,
             callable,
@@ -48,7 +65,7 @@ impl PyWorker {
     /// Builds a worker that calls `callable` with the shared `WorkerContext`.
     pub(crate) fn with_context(
         name: String,
-        callable: Arc<Py<PyAny>>,
+        callable: Arc<PyWorkerFn>,
         context: PyWorkerContext,
         shutdown: ShutdownSignal,
     ) -> Self {
@@ -187,7 +204,7 @@ impl Worker for PyWorker {
 /// registration API - and, crucially, the worker body is only ever entered once.
 fn call_with_optional_args(
     py: Python<'_>,
-    callable: &Arc<Py<PyAny>>,
+    worker_fn: &PyWorkerFn,
     context: Option<&PyWorkerContext>,
     should_stop: &PyShouldStop,
 ) -> PyResult<Py<PyAny>> {
@@ -206,7 +223,8 @@ fn call_with_optional_args(
         None => vec![vec![stop_obj.clone_ref(py)], vec![]],
     };
 
-    if let Some(accepted) = positional_arity(py, callable) {
+    let callable = &worker_fn.callable;
+    if let Some(accepted) = &worker_fn.arity {
         for arity in candidates {
             if accepted.accepts(arity.len()) {
                 return callable.call1(py, pyo3::types::PyTuple::new(py, arity)?);
@@ -241,6 +259,7 @@ fn call_with_optional_args(
 }
 
 /// How many positional arguments a callable accepts.
+#[derive(Clone, Copy)]
 struct Arity {
     required: usize,
     /// `None` when the callable takes `*args` and so accepts any count.
@@ -265,7 +284,7 @@ impl Arity {
 ///
 /// Returns `None` when the signature cannot be determined, which is the case for
 /// some builtins and C extension callables.
-fn positional_arity(py: Python<'_>, callable: &Arc<Py<PyAny>>) -> Option<Arity> {
+fn positional_arity(py: Python<'_>, callable: &Py<PyAny>) -> Option<Arity> {
     let inspect = py.import("inspect").ok()?;
     let signature = inspect
         .call_method1("signature", (callable.bind(py),))

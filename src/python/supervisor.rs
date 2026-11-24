@@ -15,7 +15,7 @@ use crate::supervisor::{SupervisorHandle, SupervisorSpec};
 use crate::types::{ChildType, ShutdownSignal};
 
 use super::types::{PyChildInfo, PyRestartIntensity, PyRestartPolicy, PyRestartStrategy};
-use super::worker::PyWorker;
+use super::worker::{PyWorker, PyWorkerFn};
 use super::{block_on_without_gil, duration_from_secs, ensure_callable, get_runtime};
 
 /// Rejects a duplicate child id at registration time.
@@ -94,7 +94,7 @@ impl PySupervisorSpec {
 
         let policy = restart_policy.inner;
         let id_clone = id.clone();
-        let worker_fn_arc = Arc::new(worker_fn.clone_ref(py));
+        let worker_fn_arc = Arc::new(PyWorkerFn::new(py, worker_fn.clone_ref(py)));
 
         self.inner = std::mem::replace(&mut self.inner, SupervisorSpec::new("temp")).with_worker(
             id,
@@ -199,7 +199,7 @@ impl PySupervisorHandle {
         let handle = self.inner.clone();
         let policy = restart_policy.inner;
         let id_clone = id.clone();
-        let worker_fn_arc = Arc::new(worker_fn.clone_ref(py));
+        let worker_fn_arc = Arc::new(PyWorkerFn::new(py, worker_fn.clone_ref(py)));
 
         let result = block_on_without_gil(py, async move {
             handle
@@ -231,7 +231,7 @@ impl PySupervisorHandle {
         let policy = restart_policy.inner;
         let id_clone = id.clone();
         let timeout = Duration::from_secs(timeout_secs);
-        let worker_fn_arc = Arc::new(worker_fn.clone_ref(py));
+        let worker_fn_arc = Arc::new(PyWorkerFn::new(py, worker_fn.clone_ref(py)));
 
         let result = block_on_without_gil(py, async move {
             handle
