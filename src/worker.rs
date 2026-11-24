@@ -208,6 +208,8 @@ impl DynWorker for FactoryPanicked {
 /// Running worker process with its specification and task handle
 pub(crate) struct WorkerProcess {
     pub spec: WorkerSpec,
+    /// Identifies this run of the worker; a restart gets a new one.
+    pub instance: u64,
     handle: Option<JoinHandle<()>>,
     /// Triggers cooperative shutdown; dropping it also releases the worker.
     shutdown_tx: tokio::sync::watch::Sender<bool>,
@@ -246,10 +248,12 @@ impl WorkerProcess {
             .unwrap_or_else(|message| Box::new(FactoryPanicked(message)));
         let worker_id = Arc::clone(&spec.id);
         let signal = ShutdownSignal::new(shutdown_rx);
+        let instance = crate::events::next_instance();
 
         let handle = tokio::spawn(run_worker(
             supervisor_name,
             worker_id,
+            instance,
             worker,
             control_tx,
             init_tx,
@@ -258,9 +262,18 @@ impl WorkerProcess {
 
         Self {
             spec,
+            instance,
             handle: Some(handle),
             shutdown_tx,
         }
+    }
+
+    /// Whether the worker's task is still running. A worker that has finished
+    /// has already sent its exit report.
+    pub(crate) fn is_running(&self) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
     }
 
     /// Sends the cooperative shutdown signal without waiting for the worker.

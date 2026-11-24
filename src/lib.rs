@@ -88,6 +88,7 @@ mod readme_doctests {}
 #[macro_use]
 mod macros;
 
+mod events;
 mod panic;
 mod restart;
 mod supervisor;
@@ -104,6 +105,7 @@ pub mod mailbox;
 pub mod python;
 
 // Re-export public API
+pub use events::SupervisorEvent;
 pub use restart::{RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy};
 pub use supervisor::{
     ChildSpec, Shutdown, ShutdownOrder, SupervisorError, SupervisorHandle, SupervisorSpec,

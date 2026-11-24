@@ -27,9 +27,18 @@ impl Child {
         }
     }
 
+    /// Identifies this run of the child; a restart gets a new one.
+    #[inline]
+    pub fn instance(&self) -> u64 {
+        match self {
+            Child::Worker(w) => w.instance,
+            Child::Supervisor { handle, .. } => handle.instance,
+        }
+    }
+
     /// The child's id as a shared string, used as its key in [`Children`].
     #[inline]
-    fn key(&self) -> &Arc<str> {
+    pub fn key(&self) -> &Arc<str> {
         match self {
             Child::Worker(w) => &w.spec.id,
             Child::Supervisor { handle, .. } => &handle.name,
@@ -73,46 +82,77 @@ impl Child {
     fn begin_stop(&mut self, default_timeout: Duration) -> PendingStop {
         let mode = self.shutdown_mode(default_timeout);
         match self {
-            Child::Worker(worker) => match mode {
-                Shutdown::BrutalKill => PendingStop::Abort,
-                Shutdown::Timeout(timeout) => {
-                    worker.request_stop();
-                    PendingStop::Worker(deadline_after(timeout))
-                }
-                Shutdown::Infinity => {
-                    worker.request_stop();
-                    PendingStop::Worker(None)
-                }
+            Child::Worker(worker) => {
+                // Checked before asking: a worker that already finished has
+                // reported its own exit, which must not be overwritten.
+                let was_running = worker.is_running();
+                let wait = match mode {
+                    Shutdown::BrutalKill => Wait::Abort,
+                    Shutdown::Timeout(timeout) => {
+                        worker.request_stop();
+                        Wait::Worker(deadline_after(timeout))
+                    }
+                    Shutdown::Infinity => {
+                        worker.request_stop();
+                        Wait::Worker(None)
+                    }
+                };
+                PendingStop { was_running, wait }
+            }
+            Child::Supervisor { handle, .. } => PendingStop {
+                was_running: !handle.is_stopped(),
+                wait: Wait::Supervisor(handle.begin_shutdown()),
             },
-            Child::Supervisor { handle, .. } => PendingStop::Supervisor(handle.begin_shutdown()),
         }
     }
 
     /// Waits for a stop started with [`begin_stop`](Self::begin_stop).
-    async fn finish_stop(&mut self, pending: PendingStop) {
-        match (self, pending) {
-            (Child::Worker(worker), PendingStop::Abort) => {
-                let _stopped = worker.abort().await;
-            }
-            (Child::Worker(worker), PendingStop::Worker(deadline)) => {
-                let _graceful = worker.stop_by(deadline).await;
-            }
-            (_, PendingStop::Supervisor(Some(done))) => {
+    async fn finish_stop(&mut self, pending: PendingStop) -> StopOutcome {
+        let stopped_itself = match (self, pending.wait) {
+            (Child::Worker(worker), Wait::Abort) => worker.abort().await,
+            (Child::Worker(worker), Wait::Worker(deadline)) => worker.stop_by(deadline).await,
+            (_, Wait::Supervisor(Some(done))) => {
                 let _stopped = done.await;
+                true
             }
-            _ => {}
+            _ => true,
+        };
+
+        if !pending.was_running {
+            StopOutcome::AlreadyExited
+        } else if stopped_itself {
+            StopOutcome::Stopped
+        } else {
+            StopOutcome::Killed
         }
     }
 
     /// Stops the child according to its shutdown setting and waits for it.
-    pub async fn shutdown(&mut self, default_timeout: Duration) {
+    pub async fn shutdown(&mut self, default_timeout: Duration) -> StopOutcome {
         let pending = self.begin_stop(default_timeout);
-        self.finish_stop(pending).await;
+        self.finish_stop(pending).await
     }
 }
 
+/// How a stop requested by the supervisor ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopOutcome {
+    /// The child had already exited on its own; its exit report says why.
+    AlreadyExited,
+    /// The child stopped cooperatively. It still sends an exit report, which
+    /// the supervisor recognises as its own doing.
+    Stopped,
+    /// The child's task was aborted; it sends no exit report.
+    Killed,
+}
+
 /// A stop that has been requested but not yet waited for.
-enum PendingStop {
+struct PendingStop {
+    was_running: bool,
+    wait: Wait,
+}
+
+enum Wait {
     /// Abort the worker outright.
     Abort,
     /// Wait for the signalled worker until this deadline (`None`: forever).
@@ -129,25 +169,31 @@ enum PendingStop {
 /// it is still running. With [`ShutdownOrder::Concurrent`] every child is asked
 /// first and then waited for, so the total time is the slowest child's rather
 /// than the sum.
+///
+/// Returns each child's [`StopOutcome`], in the same order as `children`.
 pub(crate) async fn stop_all(
     children: &mut [Child],
     default_timeout: Duration,
     order: ShutdownOrder,
-) {
+) -> Vec<StopOutcome> {
     match order {
         ShutdownOrder::Reverse => {
-            for child in children.iter_mut().rev() {
-                child.shutdown(default_timeout).await;
+            let mut outcomes = vec![StopOutcome::AlreadyExited; children.len()];
+            for (child, outcome) in children.iter_mut().zip(outcomes.iter_mut()).rev() {
+                *outcome = child.shutdown(default_timeout).await;
             }
+            outcomes
         }
         ShutdownOrder::Concurrent => {
             let pending: Vec<PendingStop> = children
                 .iter_mut()
                 .map(|child| child.begin_stop(default_timeout))
                 .collect();
+            let mut outcomes = Vec::with_capacity(children.len());
             for (child, stop) in children.iter_mut().zip(pending) {
-                child.finish_stop(stop).await;
+                outcomes.push(child.finish_stop(stop).await);
             }
+            outcomes
         }
     }
 }

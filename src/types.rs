@@ -21,13 +21,18 @@ use std::sync::Arc;
     RkyvDeserialize,
 )]
 #[rkyv(derive(Debug))]
+#[non_exhaustive]
 pub enum ChildExitReason {
     /// Normal termination
     Normal,
     /// Abnormal termination (error or panic)
     Abnormal,
-    /// Shutdown requested
+    /// Stopped by its supervisor, cooperatively
     Shutdown,
+    /// Stopped by its supervisor by aborting its task, because its shutdown
+    /// setting is `BrutalKill` or it overran its shutdown timeout. Its
+    /// `shutdown` hook did not run.
+    Killed,
 }
 
 /// Child identifier type

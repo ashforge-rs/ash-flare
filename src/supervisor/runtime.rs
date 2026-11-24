@@ -1,13 +1,15 @@
 //! Supervisor runtime - internal state machine
 
-use super::child::{Child, Children, stop_all};
+use super::child::{Child, Children, StopOutcome, stop_all};
 use super::error::SupervisorError;
 use super::handle::SupervisorHandle;
 use super::spec::{ChildDef, ShutdownOrder, SupervisorSpec};
+use crate::events::{EventSender, SupervisorEvent, emit};
 use crate::restart::{BackoffTracker, RestartPolicy, RestartStrategy, RestartTracker};
 use crate::supervisor_common::{RestartDecision, decide_restart};
 use crate::types::{ChildExitReason, ChildId, ChildInfo};
 use crate::worker::{WorkerProcess, WorkerSpec};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -40,8 +42,11 @@ pub(crate) enum SupervisorCommand {
     GetStatus {
         respond_to: oneshot::Sender<StatusSnapshot>,
     },
+    /// A child's exit report. `instance` tells reports from a child that has
+    /// since been replaced apart from reports about the current one.
     ChildTerminated {
         id: Arc<str>,
+        instance: u64,
         reason: ChildExitReason,
     },
     /// Fires once a restart backoff has elapsed. Restarts are deferred through
@@ -89,6 +94,10 @@ pub(crate) struct SupervisorRuntime {
     shutdown_timeout: Duration,
     shutdown_order: ShutdownOrder,
     created_at: std::time::Instant,
+    events: EventSender,
+    /// Instances this supervisor stopped and already reported as terminated;
+    /// their own exit reports are not reported again.
+    silenced: HashSet<u64>,
 }
 
 impl SupervisorRuntime {
@@ -97,6 +106,7 @@ impl SupervisorRuntime {
         name: Arc<str>,
         control_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
         control_tx: mpsc::UnboundedSender<SupervisorCommand>,
+        events: EventSender,
     ) -> Self {
         let mut children = Children::with_capacity(spec.children.len());
 
@@ -120,6 +130,15 @@ impl SupervisorRuntime {
             }
         }
 
+        for child in children.iter() {
+            emit(
+                &events,
+                SupervisorEvent::ChildStarted {
+                    id: Arc::clone(child.key()),
+                },
+            );
+        }
+
         Self {
             name,
             children,
@@ -131,6 +150,8 @@ impl SupervisorRuntime {
             shutdown_timeout: spec.shutdown_timeout,
             shutdown_order: spec.shutdown_order,
             created_at: std::time::Instant::now(),
+            events,
+            silenced: HashSet::new(),
         }
     }
 
@@ -173,8 +194,14 @@ impl SupervisorRuntime {
                     let uptime = self.created_at.elapsed();
                     let _send = respond_to.send(uptime);
                 }
-                SupervisorCommand::ChildTerminated { id, reason } => {
-                    if self.handle_child_terminated(id, reason).await == RuntimeControl::Stop {
+                SupervisorCommand::ChildTerminated {
+                    id,
+                    instance,
+                    reason,
+                } => {
+                    if self.handle_child_terminated(id, instance, reason).await
+                        == RuntimeControl::Stop
+                    {
                         // Restart intensity exceeded: children are already shut
                         // down. Terminate the supervisor itself, reporting an
                         // abnormal exit so a parent supervisor observes the
@@ -210,7 +237,7 @@ impl SupervisorRuntime {
         let id = spec.id.to_string();
         let worker = WorkerProcess::spawn(spec, Arc::clone(&self.name), self.control_tx.clone());
 
-        self.children.push(Child::Worker(worker));
+        self.push_started(Child::Worker(worker));
         tracing::debug!(
             supervisor = %self.name,
             child = %id,
@@ -245,7 +272,7 @@ impl SupervisorRuntime {
         match init_result {
             Ok(Ok(Ok(()))) => {
                 // Initialization succeeded
-                self.children.push(Child::Worker(worker));
+                self.push_started(Child::Worker(worker));
                 tracing::debug!(
                     supervisor = %self.name,
                     child = %id,
@@ -302,7 +329,8 @@ impl SupervisorRuntime {
             .ok_or_else(|| SupervisorError::ChildNotFound(id.to_owned()))?;
 
         let mut child = self.children.remove(position);
-        child.shutdown(self.shutdown_timeout).await;
+        let outcome = child.shutdown(self.shutdown_timeout).await;
+        self.record_stop(&child, outcome);
         self.backoff_tracker.reset_child(id);
 
         tracing::debug!(
@@ -327,6 +355,7 @@ impl SupervisorRuntime {
     async fn handle_child_terminated(
         &mut self,
         id: Arc<str>,
+        instance: u64,
         reason: ChildExitReason,
     ) -> RuntimeControl {
         tracing::debug!(
@@ -336,14 +365,35 @@ impl SupervisorRuntime {
             "child terminated"
         );
 
-        let Some(position) = self.children.position(&id) else {
-            tracing::warn!(
+        let current = self
+            .children
+            .position(&id)
+            .filter(|&position| self.children[position].instance() == instance);
+        let Some(position) = current else {
+            // The report is about an instance that has since been stopped,
+            // replaced or removed. It must not trigger a restart of whatever
+            // now holds the id; it is only reported if nobody has yet.
+            if !self.silenced.remove(&instance) {
+                emit(
+                    &self.events,
+                    SupervisorEvent::ChildTerminated { id, reason },
+                );
+            }
+            tracing::debug!(
                 supervisor = %self.name,
-                child = %id,
-                "terminated child not found in list"
+                instance,
+                "exit report from a replaced or removed child instance"
             );
             return RuntimeControl::Continue;
         };
+
+        emit(
+            &self.events,
+            SupervisorEvent::ChildTerminated {
+                id: Arc::clone(&id),
+                reason,
+            },
+        );
 
         // Supervision semantics live in one shared place; this runtime only
         // carries out the decision.
@@ -379,6 +429,7 @@ impl SupervisorRuntime {
                     supervisor = %self.name,
                     "restart intensity exceeded, shutting down"
                 );
+                emit(&self.events, SupervisorEvent::RestartIntensityExceeded);
                 self.shutdown_children().await;
                 RuntimeControl::Stop
             }
@@ -437,12 +488,14 @@ impl SupervisorRuntime {
     }
 
     async fn restart_child(&mut self, position: usize) {
-        self.children[position]
+        let outcome = self.children[position]
             .shutdown(self.shutdown_timeout)
             .await;
+        let stopped = &self.children[position];
+        Self::record_stop_into(&mut self.silenced, &self.events, stopped, outcome);
 
         let child = &mut self.children[position];
-        Self::respawn(child, &self.name, &self.control_tx);
+        Self::respawn(child, &self.name, &self.control_tx, &self.events);
         tracing::debug!(
             supervisor = %self.name,
             child = %child.id(),
@@ -475,7 +528,14 @@ impl SupervisorRuntime {
         child: &mut Child,
         supervisor_name: &Arc<str>,
         control_tx: &mpsc::UnboundedSender<SupervisorCommand>,
+        events: &EventSender,
     ) {
+        emit(
+            events,
+            SupervisorEvent::ChildRestarted {
+                id: Arc::clone(child.key()),
+            },
+        );
         match child {
             Child::Worker(worker) => {
                 let spec = worker.spec.clone();
@@ -517,15 +577,18 @@ impl SupervisorRuntime {
     /// children leave supervision instead of being restarted.
     async fn restart_range(&mut self, position: usize) {
         let (timeout, order) = (self.shutdown_timeout, self.shutdown_order);
-        stop_all(
+        let outcomes = stop_all(
             Self::affected_from(&mut self.children, position),
             timeout,
             order,
         )
         .await;
 
+        let affected = Self::affected_from(&mut self.children, position);
+        Self::record_stops(&mut self.silenced, &self.events, affected, &outcomes, order);
+
         let mut dropped_any = false;
-        for child in Self::affected_from(&mut self.children, position) {
+        for child in affected {
             if Self::leaves_supervision(child) {
                 tracing::debug!(
                     supervisor = %self.name,
@@ -537,7 +600,7 @@ impl SupervisorRuntime {
                 continue;
             }
 
-            Self::respawn(child, &self.name, &self.control_tx);
+            Self::respawn(child, &self.name, &self.control_tx, &self.events);
             tracing::debug!(
                 supervisor = %self.name,
                 child = %child.id(),
@@ -554,17 +617,92 @@ impl SupervisorRuntime {
     }
 
     async fn shutdown_children(&mut self) {
-        stop_all(
+        let outcomes = stop_all(
             self.children.as_mut_slice(),
             self.shutdown_timeout,
             self.shutdown_order,
         )
         .await;
+        let order = self.shutdown_order;
+        Self::record_stops(
+            &mut self.silenced,
+            &self.events,
+            self.children.as_mut_slice(),
+            &outcomes,
+            order,
+        );
         tracing::debug!(
             supervisor = %self.name,
             children = self.children.len(),
             "shut down children"
         );
         self.children.clear();
+    }
+
+    /// Adds a newly started child and reports it.
+    fn push_started(&mut self, child: Child) {
+        emit(
+            &self.events,
+            SupervisorEvent::ChildStarted {
+                id: Arc::clone(child.key()),
+            },
+        );
+        self.children.push(child);
+    }
+
+    /// Reports a child this supervisor stopped. See [`Self::record_stop_into`].
+    fn record_stop(&mut self, child: &Child, outcome: StopOutcome) {
+        Self::record_stop_into(&mut self.silenced, &self.events, child, outcome);
+    }
+
+    /// Reports the children stopped together by [`stop_all`], in the order
+    /// they were stopped.
+    fn record_stops(
+        silenced: &mut HashSet<u64>,
+        events: &EventSender,
+        children: &[Child],
+        outcomes: &[StopOutcome],
+        order: ShutdownOrder,
+    ) {
+        let stops = children.iter().zip(outcomes.iter().copied());
+        match order {
+            ShutdownOrder::Reverse => {
+                for (child, outcome) in stops.rev() {
+                    Self::record_stop_into(silenced, events, child, outcome);
+                }
+            }
+            ShutdownOrder::Concurrent => {
+                for (child, outcome) in stops {
+                    Self::record_stop_into(silenced, events, child, outcome);
+                }
+            }
+        }
+    }
+
+    /// Reports the termination of a child this supervisor stopped, exactly
+    /// once: a child that had already exited reported itself; one that
+    /// stopped cooperatively is reported now and its own later report is
+    /// silenced; one that was killed sends no report, so it is reported now.
+    fn record_stop_into(
+        silenced: &mut HashSet<u64>,
+        events: &EventSender,
+        child: &Child,
+        outcome: StopOutcome,
+    ) {
+        let reason = match outcome {
+            StopOutcome::AlreadyExited => return,
+            StopOutcome::Stopped => {
+                silenced.insert(child.instance());
+                ChildExitReason::Shutdown
+            }
+            StopOutcome::Killed => ChildExitReason::Killed,
+        };
+        emit(
+            events,
+            SupervisorEvent::ChildTerminated {
+                id: Arc::clone(child.key()),
+                reason,
+            },
+        );
     }
 }

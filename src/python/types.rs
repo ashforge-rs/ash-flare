@@ -192,6 +192,7 @@ impl PyChildExitReason {
             ChildExitReason::Normal => "ChildExitReason.Normal".to_owned(),
             ChildExitReason::Abnormal => "ChildExitReason.Abnormal".to_owned(),
             ChildExitReason::Shutdown => "ChildExitReason.Shutdown".to_owned(),
+            ChildExitReason::Killed => "ChildExitReason.Killed".to_owned(),
         }
     }
 

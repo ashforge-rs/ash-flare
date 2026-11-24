@@ -369,6 +369,7 @@ impl fmt::Display for QualifiedName<'_> {
 pub(crate) async fn run_worker(
     supervisor_name: Arc<str>,
     worker_id: Arc<str>,
+    instance: u64,
     mut worker: Box<dyn DynWorker>,
     control_tx: mpsc::UnboundedSender<SupervisorCommand>,
     init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
@@ -402,6 +403,7 @@ pub(crate) async fn run_worker(
             }
             let _send = control_tx.send(SupervisorCommand::ChildTerminated {
                 id: worker_id,
+                instance,
                 reason: ChildExitReason::Abnormal,
             });
             return;
@@ -453,6 +455,7 @@ pub(crate) async fn run_worker(
     // Notify supervisor of termination
     let _send = control_tx.send(SupervisorCommand::ChildTerminated {
         id: worker_id,
+        instance,
         reason: exit_reason,
     });
 }

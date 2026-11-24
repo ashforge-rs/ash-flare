@@ -3,6 +3,7 @@
 use super::error::SupervisorError;
 use super::runtime::{StatusSnapshot, SupervisorCommand, SupervisorRuntime};
 use super::spec::{ChildSpec, SupervisorSpec};
+use crate::events::{EVENT_CAPACITY, EventSender, SupervisorEvent, emit};
 use crate::restart::{RestartPolicy, RestartStrategy};
 use crate::types::{ChildId, ChildInfo};
 use crate::worker::WorkerFactory;
@@ -16,7 +17,10 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Clone)]
 pub struct SupervisorHandle {
     pub(crate) name: Arc<str>,
+    /// Identifies this run of the supervisor as a child of its parent.
+    pub(crate) instance: u64,
     pub(crate) control_tx: mpsc::UnboundedSender<SupervisorCommand>,
+    events: EventSender,
 }
 
 impl SupervisorHandle {
@@ -50,11 +54,19 @@ impl SupervisorHandle {
         parent_tx: Option<mpsc::UnboundedSender<SupervisorCommand>>,
     ) -> Self {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let (events, _no_subscriber_yet) = tokio::sync::broadcast::channel(EVENT_CAPACITY);
         let name_arc: Arc<str> = Arc::from(spec.name.as_str());
-        let runtime =
-            SupervisorRuntime::new(spec, Arc::clone(&name_arc), control_rx, control_tx.clone());
+        let instance = crate::events::next_instance();
+        let runtime = SupervisorRuntime::new(
+            spec,
+            Arc::clone(&name_arc),
+            control_rx,
+            control_tx.clone(),
+            events.clone(),
+        );
 
         let runtime_name = Arc::clone(&name_arc);
+        let runtime_events = events.clone();
         tokio::spawn(async move {
             // A panic in the runtime itself must still reach the parent, as an
             // abnormal exit, or the parent would keep a dead child forever.
@@ -65,12 +77,14 @@ impl SupervisorHandle {
                     crate::types::ChildExitReason::Abnormal
                 });
             tracing::debug!(name = %runtime_name, reason = ?reason, "supervisor stopped");
+            emit(&runtime_events, SupervisorEvent::Stopped { reason });
 
             // A `Shutdown` reason is the parent's own doing and is ignored there;
             // an abnormal exit is what makes the parent restart this subtree.
             if let Some(tx) = parent_tx {
                 let _send = tx.send(SupervisorCommand::ChildTerminated {
                     id: Arc::clone(&runtime_name),
+                    instance,
                     reason,
                 });
             }
@@ -78,8 +92,23 @@ impl SupervisorHandle {
 
         Self {
             name: name_arc,
+            instance,
             control_tx,
+            events,
         }
+    }
+
+    /// Subscribes to this supervisor's [`SupervisorEvent`]s: children
+    /// starting, restarting and terminating, and the supervisor itself
+    /// stopping.
+    ///
+    /// Only events after the call are received. A subscriber that falls more
+    /// than about a thousand events behind misses the oldest ones and is told
+    /// so with `RecvError::Lagged`. Events of nested supervisors are not
+    /// included; subscribe to those separately.
+    #[must_use]
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<SupervisorEvent> {
+        self.events.subscribe()
     }
 
     /// Sends a command built around a reply channel and waits for the reply.
