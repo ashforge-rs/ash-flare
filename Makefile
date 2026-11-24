@@ -1,4 +1,4 @@
-.PHONY: help publish check test clean tag release release-patch release-minor release-major \
+.PHONY: help publish check test bench bench-baseline bench-compare clean tag release release-patch release-minor release-major \
         dry-run pre-commit fmt lint doc build python-venv python-build python-install \
         python-dev python-clean python-test
 
@@ -20,6 +20,9 @@ help:
 	@echo "  lint             - Run clippy linter"
 	@echo "  doc              - Build documentation"
 	@echo "  doc-test         - Run documentation tests"
+	@echo "  bench            - Run benchmarks"
+	@echo "  bench-baseline   - Run benchmarks and save them as baseline BASELINE (default: main)"
+	@echo "  bench-compare    - Run benchmarks and compare against baseline BASELINE"
 	@echo "  clean            - Clean build artifacts"
 	@echo ""
 	@echo "Python Bindings (using UV):"
@@ -44,6 +47,19 @@ help:
 	@echo "Current version: $(CURRENT_VERSION)"
 
 # Development commands
+# Criterion stores baselines under target/criterion. Save one before a change
+# (`make bench-baseline`) and compare after it (`make bench-compare`).
+BASELINE ?= main
+
+bench:
+	cargo bench --bench supervision_benchmark
+
+bench-baseline:
+	cargo bench --bench supervision_benchmark -- --save-baseline $(BASELINE)
+
+bench-compare:
+	cargo bench --bench supervision_benchmark -- --baseline $(BASELINE)
+
 check:
 	@echo "Running cargo check..."
 	@cargo check --workspace --all-features

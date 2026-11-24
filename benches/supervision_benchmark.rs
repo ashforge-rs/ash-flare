@@ -1,6 +1,6 @@
 use ash_flare::{
-    RestartIntensity, RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker,
-    WorkerContext,
+    RestartIntensity, RestartPolicy, RestartStrategy, ShutdownSignal, SupervisorHandle,
+    SupervisorSpec, Worker, WorkerContext,
 };
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -39,6 +39,25 @@ impl Worker for StatefulWorker {
             .set(format!("worker-{}", self.id), serde_json::json!(self.id));
         let _ = self.context.get(&format!("worker-{}", self.id));
         sleep(Duration::from_micros(10)).await;
+        Ok(())
+    }
+}
+
+/// Runs until asked to stop, then spends a few milliseconds cleaning up, like a
+/// worker flushing a buffer or closing a connection.
+struct CleanupWorker {
+    shutdown: ShutdownSignal,
+}
+impl Worker for CleanupWorker {
+    type Error = std::io::Error;
+
+    async fn run(&mut self) -> Result<(), Self::Error> {
+        self.shutdown.cancelled().await;
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> Result<(), Self::Error> {
+        sleep(Duration::from_millis(5)).await;
         Ok(())
     }
 }
@@ -101,6 +120,45 @@ fn bench_supervisor_shutdown(c: &mut Criterion) {
 
                         // Measure shutdown time
                         let _ = handle.shutdown().await;
+                    });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Shutdown of a tree whose workers each need 5ms of cleanup. Measures only the
+/// `shutdown()` call, which is where stopping children one at a time adds up.
+fn bench_cooperative_shutdown(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cooperative_shutdown");
+    group.sample_size(10);
+
+    for worker_count in [5, 20].iter() {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(worker_count),
+            worker_count,
+            |b, &count| {
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter_custom(|iters| async move {
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            let mut spec = SupervisorSpec::new("bench");
+                            for i in 0..count {
+                                spec = spec.with_worker(
+                                    format!("worker-{}", i),
+                                    |shutdown| CleanupWorker { shutdown },
+                                    RestartPolicy::Permanent,
+                                );
+                            }
+                            let handle = SupervisorHandle::start(spec);
+                            sleep(Duration::from_millis(5)).await;
+
+                            let started = std::time::Instant::now();
+                            let _ = handle.shutdown().await;
+                            total += started.elapsed();
+                        }
+                        total
                     });
             },
         );
@@ -337,6 +395,7 @@ criterion_group!(
     benches,
     bench_supervisor_startup,
     bench_supervisor_shutdown,
+    bench_cooperative_shutdown,
     bench_nested_supervisors,
     bench_stateful_context_operations,
     bench_stateful_supervisor_startup,
