@@ -98,6 +98,7 @@ mod worker;
 
 pub mod distributed;
 pub mod mailbox;
+pub mod registry;
 
 // Python bindings module, compiled only for the `python` feature so pure-Rust
 // consumers do not pull in pyo3 or link against Python.
@@ -106,6 +107,7 @@ pub mod python;
 
 // Re-export public API
 pub use events::SupervisorEvent;
+pub use registry::{Registration, Registry, RegistryError};
 pub use restart::{RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy};
 pub use supervisor::{
     ChildSpec, Shutdown, ShutdownOrder, SupervisorError, SupervisorHandle, SupervisorSpec,
