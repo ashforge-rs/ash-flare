@@ -30,8 +30,8 @@ This is a major release; see "Migrating from 3.x" in the README.
 
 - `ChildSpec` with per-child `Shutdown::{BrutalKill, Timeout, Infinity}`; `with_child`, `start_child_spec`, `start_child_spec_linked`.
 - `ShutdownOrder::{Reverse, Concurrent}`.
-- `SupervisorHandle::subscribe` and `SupervisorEvent` for monitoring.
-- `SupervisorHandle::kill_child` and `link` for linking two children.
+- `SupervisorHandle::monitor` and `monitor_child`, which return a `Monitor` that never misses an event, and `SupervisorHandle::subscribe`, a bounded broadcast for logs and metrics; `SupervisorEvent`.
+- `SupervisorHandle::kill_child` and `link` for linking two children. Links are built on monitors, so a busy supervisor cannot make one miss a termination.
 - Typed `Mailbox<M>` / `MailboxHandle<M>` that survive restarts and can be shared as a pool; `MailboxHandle::call` with `Reply` and `CallError`.
 - `Registry` for finding workers by name.
 - `AutoShutdown` with significant children; `SupervisorSpec::with_restart_policy` for nested supervisors.
@@ -59,7 +59,7 @@ This is a major release; see "Migrating from 3.x" in the README.
 
 - Each worker runs on its own thread; the 512-worker limit of the blocking pool is gone.
 - `add_worker` accepts `shutdown=` and `significant=`; specs gain `with_shutdown_order`, `with_auto_shutdown` and `with_restart_policy`.
-- Handles gain `kill_child`, `subscribe` and `start_unique_child`; `link` links two children.
+- Handles gain `kill_child`, `subscribe` (lossless) and `start_unique_child`; `link` links two children.
 - `RemoteSupervisorHandle` accepts `cookie=` and gains `status`.
 - `SupervisorHandle.start` raises `ValueError` for an invalid spec; `shutdown` blocks until the tree has stopped.
 

@@ -200,7 +200,7 @@ impl PyStatefulSupervisorHandle {
 
     /// A stream of this supervisor's events.
     fn subscribe(&self) -> PyEventStream {
-        PyEventStream::new(self.inner.subscribe())
+        PyEventStream::new(self.inner.monitor())
     }
 
     fn terminate_child(&self, child_id: String, py: Python<'_>) -> PyResult<()> {

@@ -37,7 +37,8 @@
 //!   significant children and [`AutoShutdown`], worker pools.
 //! - **Failure handling**: panics are supervised like errors; [`ShutdownOrder`]
 //!   controls how children are stopped together.
-//! - **Monitoring**: [`SupervisorHandle::subscribe`] for [`SupervisorEvent`]s,
+//! - **Monitoring**: [`SupervisorHandle::monitor`] for a lossless stream of
+//!   [`SupervisorEvent`]s, [`SupervisorHandle::subscribe`] for a lossy one,
 //!   [`link`] and [`SupervisorHandle::kill_child`].
 //! - **Messaging**: typed [mailboxes](mod@mailbox) with call/cast and a [`Registry`].
 //! - **Blocking work**: [`ChildSpec::isolated`] and
@@ -80,7 +81,7 @@ pub mod registry;
 pub mod python;
 
 // Re-export public API
-pub use events::SupervisorEvent;
+pub use events::{Monitor, SupervisorEvent};
 pub use link::{Link, link};
 pub use registry::{Registration, Registry, RegistryError};
 pub use restart::{RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy};

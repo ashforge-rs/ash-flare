@@ -47,7 +47,7 @@ graph TB
 | `supervisor` | Spec, handle, runtime, child bookkeeping, errors |
 | `supervisor_common` | Restart decisions and the worker lifecycle |
 | `restart` | Strategies, policies, intensity and backoff tracking |
-| `events` | `SupervisorEvent`, child instance numbers |
+| `events` | `SupervisorEvent`, lossless `Monitor`s and the lossy broadcast, child instance numbers |
 | `link` | Links between children |
 | `panic` | Turning panics into abnormal exits |
 | `stall` | Poll timing and the stall watchdog |

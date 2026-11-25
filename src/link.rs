@@ -34,11 +34,9 @@
 //! # }
 //! ```
 
-use crate::events::SupervisorEvent;
+use crate::events::{Monitor, SupervisorEvent};
 use crate::supervisor::SupervisorHandle;
 use crate::types::ChildExitReason;
-use tokio::sync::broadcast::Receiver;
-use tokio::sync::broadcast::error::RecvError;
 use tokio::task::JoinHandle;
 
 /// Keeps two children linked; dropping it removes the link.
@@ -72,21 +70,20 @@ impl Drop for Link {
 ///
 /// Must be called from within a tokio runtime. Linking a child to itself does
 /// nothing.
+///
+/// Each end is watched through a [`Monitor`], so no termination is missed,
+/// however busy the supervisors are. The link ends by itself once both
+/// supervisors have stopped.
 #[must_use = "dropping the Link removes it immediately"]
 pub fn link(a: &SupervisorHandle, a_child: &str, b: &SupervisorHandle, b_child: &str) -> Link {
-    let same_supervisor = a.control_tx.same_channel(&b.control_tx);
-    if same_supervisor && a_child == b_child {
+    if a.control_tx.same_channel(&b.control_tx) && a_child == b_child {
         return Link { task: None };
     }
 
-    // Subscribed before returning, so nothing that happens after `link`
+    // Monitored before returning, so nothing that happens after `link`
     // returns is missed.
-    let a_end = End::new(a.clone(), a_child, a.subscribe());
-    let b_end = End::new(
-        b.clone(),
-        b_child,
-        (!same_supervisor).then(|| b.subscribe()),
-    );
+    let a_end = End::new(a.clone(), a_child);
+    let b_end = End::new(b.clone(), b_child);
     let task = tokio::spawn(propagate(a_end, b_end));
     Link { task: Some(task) }
 }
@@ -95,29 +92,42 @@ pub fn link(a: &SupervisorHandle, a_child: &str, b: &SupervisorHandle, b_child: 
 struct End {
     handle: SupervisorHandle,
     child: String,
-    /// `None` when both sides share one supervisor, and so one event stream.
-    events: Option<Receiver<SupervisorEvent>>,
+    /// `None` once this side's supervisor has stopped.
+    monitor: Option<Monitor>,
     /// Kills sent to this child by the link whose terminations are still to
     /// be seen; those are not propagated back.
     pending_kills: usize,
 }
 
 impl End {
-    fn new(
-        handle: SupervisorHandle,
-        child: &str,
-        events: impl Into<Option<Receiver<SupervisorEvent>>>,
-    ) -> Self {
+    fn new(handle: SupervisorHandle, child: &str) -> Self {
+        let monitor = Some(handle.monitor_child(child));
         Self {
             handle,
             child: child.to_owned(),
-            events: events.into(),
+            monitor,
             pending_kills: 0,
         }
     }
+
+    /// The next abnormal termination of this end's child, or `None` once its
+    /// supervisor has stopped.
+    async fn next_termination(&mut self) -> Option<ChildExitReason> {
+        let monitor = self.monitor.as_mut()?;
+        while let Some(event) = monitor.recv().await {
+            // A normal exit does not travel along a link, as in Erlang.
+            if let SupervisorEvent::ChildTerminated { reason, .. } = event
+                && reason != ChildExitReason::Normal
+            {
+                return Some(reason);
+            }
+        }
+        self.monitor = None;
+        None
+    }
 }
 
-/// Which end an event is about.
+/// Which end a termination is about.
 #[derive(Clone, Copy)]
 enum Side {
     A,
@@ -125,27 +135,11 @@ enum Side {
 }
 
 async fn propagate(mut a: End, mut b: End) {
-    loop {
-        let event = tokio::select! {
-            event = recv(&mut a.events) => event,
-            event = recv(&mut b.events) => event,
-        };
-        let Some(SupervisorEvent::ChildTerminated { id, reason }) = event else {
-            continue;
-        };
-        // A normal exit does not travel along a link, as in Erlang.
-        if reason == ChildExitReason::Normal {
-            continue;
-        }
-
-        // With one supervisor, both ends' events arrive on `a`'s stream, so
-        // the side is decided by the child id alone.
-        let side = if *id == *a.child {
-            Side::A
-        } else if *id == *b.child {
-            Side::B
-        } else {
-            continue;
+    while a.monitor.is_some() || b.monitor.is_some() {
+        let (side, reason) = tokio::select! {
+            Some(reason) = a.next_termination(), if a.monitor.is_some() => (Side::A, reason),
+            Some(reason) = b.next_termination(), if b.monitor.is_some() => (Side::B, reason),
+            else => continue,
         };
         let (dead, other) = match side {
             Side::A => (&mut a, &mut b),
@@ -164,22 +158,6 @@ async fn propagate(mut a: End, mut b: End) {
                 reason = ?reason,
                 "linked child terminated, killed its partner"
             );
-        }
-    }
-}
-
-/// Next event from `events`, or never when there is no stream.
-async fn recv(events: &mut Option<Receiver<SupervisorEvent>>) -> Option<SupervisorEvent> {
-    let Some(receiver) = events else {
-        return std::future::pending().await;
-    };
-    loop {
-        match receiver.recv().await {
-            Ok(event) => return Some(event),
-            // Fell behind; carry on with what is still buffered.
-            Err(RecvError::Lagged(_)) => {}
-            // Every handle is gone; this side will never report again.
-            Err(RecvError::Closed) => return std::future::pending().await,
         }
     }
 }

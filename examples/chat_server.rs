@@ -28,13 +28,12 @@
 //! Run with: `cargo run --example chat_server`
 
 use ash_flare::{
-    ChildExitReason, ChildSpec, Mailbox, MailboxConfig, MailboxHandle, Registration, Registry,
-    Reply, RestartPolicy, Shutdown, SupervisorEvent, SupervisorHandle, SupervisorSpec, Worker,
-    mailbox_named,
+    ChildExitReason, ChildSpec, Mailbox, MailboxConfig, MailboxHandle, Monitor, Registration,
+    Registry, Reply, RestartPolicy, Shutdown, SupervisorEvent, SupervisorHandle, SupervisorSpec,
+    Worker, mailbox_named,
 };
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::sync::broadcast::Receiver;
 use tokio::time::sleep;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(1);
@@ -158,7 +157,7 @@ impl Lobby {
             inbox: inbox.clone(),
             history: history.clone(),
             // Subscribed afresh by every instance: its members' 'DOWN' messages.
-            monitor: sessions.subscribe(),
+            monitor: sessions.monitor(),
             members: HashMap::new(),
             _registered: registry.register(format!("room:{name}"), me.clone()),
         };
@@ -195,7 +194,7 @@ struct Room {
     name: String,
     inbox: Mailbox<RoomMsg>,
     history: HistoryRef,
-    monitor: Receiver<SupervisorEvent>,
+    monitor: Monitor,
     /// By session id, which is what the monitor reports.
     members: HashMap<String, Member>,
     _registered: Registration,
@@ -290,8 +289,8 @@ impl Worker for Room {
                     Some(message) => self.handle(message).await?,
                     None => return Ok(()),
                 },
-                event = self.monitor.recv() => {
-                    if let Ok(SupervisorEvent::ChildTerminated { id, reason }) = event {
+                Some(event) = self.monitor.recv() => {
+                    if let SupervisorEvent::ChildTerminated { id, reason } = event {
                         self.member_down(&id, reason);
                     }
                 }
@@ -312,7 +311,7 @@ struct Session {
     lobby: LobbyRef,
     registry: Registry,
     /// Restarts of rooms, so this session can rejoin them.
-    room_events: Receiver<SupervisorEvent>,
+    room_events: Monitor,
     joined: HashMap<String, RoomRef>,
     current: Option<RoomRef>,
     _registered: Option<Registration>,
@@ -418,11 +417,7 @@ impl Worker for Session {
                     Some(SessionMsg::Deliver(text)) => self.show(&text),
                     None => return Ok(()),
                 },
-                event = self.room_events.recv() => {
-                    if let Ok(event) = event {
-                        self.room_event(event).await?;
-                    }
-                }
+                Some(event) = self.room_events.recv() => self.room_event(event).await?,
             }
         }
     }
@@ -506,7 +501,7 @@ impl Chat {
             me: me.clone(),
             lobby: lobby.clone(),
             registry: registry.clone(),
-            room_events: rooms.subscribe(),
+            room_events: rooms.monitor(),
             joined: HashMap::new(),
             current: None,
             _registered: None,

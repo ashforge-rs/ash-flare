@@ -147,7 +147,11 @@ class SupervisorEvent:
     reason: Optional[ChildExitReason]
 
 class EventStream:
-    """A supervisor's events. Iteration ends after the ``stopped`` event."""
+    """A supervisor's events. Iteration ends after the ``stopped`` event.
+
+    No event is ever missed: events queue until read, so read the stream or
+    drop it.
+    """
 
     def recv(self, timeout: Optional[float] = None) -> Optional[SupervisorEvent]:
         """Next event, or ``None`` after ``timeout`` seconds."""

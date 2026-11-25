@@ -3,7 +3,7 @@
 use super::error::SupervisorError;
 use super::runtime::{StatusSnapshot, SupervisorCommand, SupervisorRuntime};
 use super::spec::{ChildSpec, SupervisorSpec};
-use crate::events::{EVENT_CAPACITY, EventSender, SupervisorEvent, emit};
+use crate::events::{EventSender, Monitor, SupervisorEvent, emit};
 use crate::restart::{RestartPolicy, RestartStrategy};
 use crate::types::{ChildId, ChildInfo};
 use crate::worker::WorkerFactory;
@@ -54,7 +54,7 @@ impl SupervisorHandle {
         parent_tx: Option<mpsc::UnboundedSender<SupervisorCommand>>,
     ) -> Self {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
-        let (events, _no_subscriber_yet) = tokio::sync::broadcast::channel(EVENT_CAPACITY);
+        let events = EventSender::new();
         let name_arc: Arc<str> = Arc::from(spec.name.as_str());
         let instance = crate::events::next_instance();
         let runtime = SupervisorRuntime::new(
@@ -78,6 +78,7 @@ impl SupervisorHandle {
                 });
             tracing::debug!(name = %runtime_name, reason = ?reason, "supervisor stopped");
             emit(&runtime_events, SupervisorEvent::Stopped { reason });
+            runtime_events.close();
 
             // A `Shutdown` reason is the parent's own doing and is ignored there;
             // an abnormal exit is what makes the parent restart this subtree.
@@ -104,11 +105,53 @@ impl SupervisorHandle {
     ///
     /// Only events after the call are received. A subscriber that falls more
     /// than about a thousand events behind misses the oldest ones and is told
-    /// so with `RecvError::Lagged`. Events of nested supervisors are not
-    /// included; subscribe to those separately.
+    /// so with `RecvError::Lagged`, so use this for logs and metrics; to act on
+    /// events, use [`monitor`](Self::monitor), which misses none. Events of
+    /// nested supervisors are not included; subscribe to those separately.
     #[must_use]
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<SupervisorEvent> {
         self.events.subscribe()
+    }
+
+    /// Monitors this supervisor: every event from now on, none ever missed.
+    ///
+    /// The counterpart of `erlang:monitor/2` for a whole supervisor. Unlike
+    /// [`subscribe`](Self::subscribe), a slow reader never loses events; they
+    /// queue until read, so read the monitor or drop it. Events of nested
+    /// supervisors are not included; monitor those separately.
+    ///
+    /// ```
+    /// # use ash_flare::{RestartPolicy, ShutdownSignal, SupervisorEvent, SupervisorHandle, SupervisorSpec, Worker};
+    /// # struct Service(ShutdownSignal);
+    /// # impl Worker for Service {
+    /// #     type Error = std::io::Error;
+    /// #     async fn run(&mut self) -> Result<(), Self::Error> { self.0.cancelled().await; Ok(()) }
+    /// # }
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let handle = SupervisorHandle::start(
+    ///     SupervisorSpec::new("app").with_worker("db", Service, RestartPolicy::Permanent),
+    /// )
+    /// .unwrap();
+    /// let mut monitor = handle.monitor();
+    /// handle.shutdown().await.unwrap();
+    /// while let Some(event) = monitor.recv().await {
+    ///     println!("{event:?}"); // ends with SupervisorEvent::Stopped
+    /// }
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn monitor(&self) -> Monitor {
+        self.events.monitor(None)
+    }
+
+    /// Monitors one child: every event about the child with this id, across
+    /// its restarts, and the supervisor's `Stopped` event. None is ever missed.
+    ///
+    /// The child need not exist yet; the monitor follows the id.
+    #[must_use]
+    pub fn monitor_child(&self, id: &str) -> Monitor {
+        self.events.monitor(Some(id))
     }
 
     /// Sends a command built around a reply channel and waits for the reply.

@@ -2,9 +2,8 @@
 
 use pyo3::prelude::*;
 use std::sync::Arc;
-use tokio::sync::broadcast::{Receiver, error::RecvError};
 
-use crate::events::SupervisorEvent;
+use crate::events::{Monitor, SupervisorEvent};
 use crate::supervisor::SupervisorHandle;
 use crate::types::ChildExitReason;
 
@@ -71,16 +70,17 @@ impl From<SupervisorEvent> for PySupervisorEvent {
 
 /// A supervisor's events, from `SupervisorHandle.subscribe()`.
 ///
-/// Iterating blocks for each event (with the GIL released) and ends after the
-/// supervisor's `stopped` event.
+/// Backed by a `Monitor`, so no event is ever missed: events queue until
+/// read. Iterating blocks for each event (with the GIL released) and ends
+/// after the supervisor's `stopped` event.
 #[pyclass(name = "EventStream")]
 pub struct PyEventStream {
-    events: Arc<tokio::sync::Mutex<Receiver<SupervisorEvent>>>,
+    events: Arc<tokio::sync::Mutex<Monitor>>,
     finished: std::sync::atomic::AtomicBool,
 }
 
 impl PyEventStream {
-    pub(crate) fn new(events: Receiver<SupervisorEvent>) -> Self {
+    pub(crate) fn new(events: Monitor) -> Self {
         Self {
             events: Arc::new(tokio::sync::Mutex::new(events)),
             finished: std::sync::atomic::AtomicBool::new(false),
@@ -99,17 +99,7 @@ impl PyEventStream {
             .transpose()?;
         let stream = Arc::clone(&self.events);
         let next = block_on_without_gil(py, async move {
-            let receive = async {
-                let mut events = stream.lock().await;
-                loop {
-                    match events.recv().await {
-                        Ok(event) => return Some(event),
-                        // Fell behind; continue with what is still buffered.
-                        Err(RecvError::Lagged(_)) => {}
-                        Err(RecvError::Closed) => return None,
-                    }
-                }
-            };
+            let receive = async { stream.lock().await.recv().await };
             match limit {
                 Some(wait) => tokio::time::timeout(wait, receive).await.ok().flatten(),
                 None => receive.await,

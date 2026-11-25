@@ -1,12 +1,20 @@
 //! Supervisor events: what happened to which child, as it happens.
 //!
-//! [`SupervisorHandle::subscribe`](crate::SupervisorHandle::subscribe) returns
-//! a stream of these, the counterpart of monitoring processes on the BEAM. Use
-//! it to watch a child, react to crashes, or feed metrics and logs.
+//! There are two ways to receive them:
+//!
+//! - [`SupervisorHandle::monitor`](crate::SupervisorHandle::monitor) and
+//!   [`monitor_child`](crate::SupervisorHandle::monitor_child) return a
+//!   [`Monitor`], the counterpart of `erlang:monitor/2`: it never misses an
+//!   event. Use it when acting on an event matters, as links do.
+//! - [`SupervisorHandle::subscribe`](crate::SupervisorHandle::subscribe)
+//!   returns a broadcast receiver that holds a bounded backlog; a subscriber
+//!   that falls too far behind skips the oldest events. Use it for logs and
+//!   metrics, where a slow reader must not cost memory.
 
 use crate::types::ChildExitReason;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use tokio::sync::{broadcast, mpsc};
 
 /// Something that happened in a supervisor.
 ///
@@ -55,17 +63,149 @@ pub enum SupervisorEvent {
     },
 }
 
+impl SupervisorEvent {
+    /// The child the event is about, if it is about one.
+    fn child(&self) -> Option<&str> {
+        match self {
+            Self::ChildStarted { id }
+            | Self::ChildRestarted { id }
+            | Self::ChildTerminated { id, .. }
+            | Self::ChildStalled { id, .. } => Some(id),
+            Self::RestartIntensityExceeded | Self::Stopped { .. } => None,
+        }
+    }
+}
+
 /// How many unread events a subscriber may fall behind by before it misses
 /// some (and is told so with `RecvError::Lagged`).
 pub(crate) const EVENT_CAPACITY: usize = 1024;
 
-pub(crate) type EventSender = tokio::sync::broadcast::Sender<SupervisorEvent>;
+/// A lossless stream of a supervisor's events, the counterpart of
+/// `erlang:monitor/2`.
+///
+/// Returned by [`SupervisorHandle::monitor`](crate::SupervisorHandle::monitor),
+/// which receives every event of the supervisor, and
+/// [`SupervisorHandle::monitor_child`](crate::SupervisorHandle::monitor_child),
+/// which receives those about one child id, across its restarts, plus
+/// [`SupervisorEvent::Stopped`].
+///
+/// Events are queued for the monitor until it reads them, so none is ever
+/// missed, however far behind it falls; the cost is that a monitor nobody
+/// reads keeps growing. Dropping it stops the queueing. After the supervisor's
+/// `Stopped` event, [`recv`](Self::recv) returns `None`.
+#[derive(Debug)]
+pub struct Monitor {
+    rx: mpsc::UnboundedReceiver<SupervisorEvent>,
+}
 
-/// Sends `event` to current subscribers. Having none is normal.
+impl Monitor {
+    /// The next event, waiting until there is one. `None` once the supervisor
+    /// has stopped and every event before that has been received.
+    pub async fn recv(&mut self) -> Option<SupervisorEvent> {
+        self.rx.recv().await
+    }
+
+    /// The next event if one is waiting.
+    pub fn try_recv(&mut self) -> Option<SupervisorEvent> {
+        self.rx.try_recv().ok()
+    }
+}
+
+/// Where a supervisor's events go: broadcast subscribers, and monitors.
+///
+/// Shared by the supervisor's runtime, its handles and the stall watchdog,
+/// which emits from a thread of its own.
+#[derive(Clone)]
+pub(crate) struct EventSender(Arc<EventHub>);
+
+struct EventHub {
+    broadcast: broadcast::Sender<SupervisorEvent>,
+    monitors: Mutex<Monitors>,
+}
+
+#[derive(Default)]
+struct Monitors {
+    sinks: Vec<MonitorSink>,
+    /// Set once the supervisor has stopped; no event follows.
+    closed: bool,
+}
+
+struct MonitorSink {
+    /// Only events about this child, if set.
+    child: Option<Arc<str>>,
+    tx: mpsc::UnboundedSender<SupervisorEvent>,
+}
+
+impl MonitorSink {
+    fn wants(&self, event: &SupervisorEvent) -> bool {
+        match (&self.child, event.child()) {
+            (None, _) => true,
+            (Some(wanted), Some(about)) => **wanted == *about,
+            // A child monitor still learns that the supervisor stopped.
+            (Some(_), None) => matches!(event, SupervisorEvent::Stopped { .. }),
+        }
+    }
+}
+
+impl EventSender {
+    pub(crate) fn new() -> Self {
+        let (broadcast, _no_subscriber_yet) = broadcast::channel(EVENT_CAPACITY);
+        Self(Arc::new(EventHub {
+            broadcast,
+            monitors: Mutex::new(Monitors::default()),
+        }))
+    }
+
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<SupervisorEvent> {
+        self.0.broadcast.subscribe()
+    }
+
+    /// A monitor of every event, or of those about `child`.
+    pub(crate) fn monitor(&self, child: Option<&str>) -> Monitor {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut monitors = self.monitors();
+        // Once stopped, the monitor is born finished: `recv` returns `None`.
+        if !monitors.closed {
+            monitors.sinks.push(MonitorSink {
+                child: child.map(Arc::from),
+                tx,
+            });
+        }
+        Monitor { rx }
+    }
+
+    /// Ends every monitor after the supervisor's last event.
+    pub(crate) fn close(&self) {
+        let mut monitors = self.monitors();
+        monitors.closed = true;
+        monitors.sinks.clear();
+    }
+
+    fn monitors(&self) -> std::sync::MutexGuard<'_, Monitors> {
+        self.0
+            .monitors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Sends `event` to current subscribers and monitors. Having none is normal.
 pub(crate) fn emit(sender: &EventSender, event: SupervisorEvent) {
+    {
+        // Monitors are fed under the lock, so each sees events in the order
+        // they were emitted, even when the stall watchdog emits concurrently.
+        let mut monitors = sender.monitors();
+        monitors.sinks.retain(|sink| {
+            if sink.wants(&event) {
+                sink.tx.send(event.clone()).is_ok()
+            } else {
+                !sink.tx.is_closed()
+            }
+        });
+    }
     // Skip building nothing-to-nobody sends; `send` errors when no one listens.
-    if sender.receiver_count() > 0 {
-        let _delivered = sender.send(event);
+    if sender.0.broadcast.receiver_count() > 0 {
+        let _delivered = sender.0.broadcast.send(event);
     }
 }
 

@@ -152,19 +152,22 @@ use ash_flare::{RestartPolicy, ShutdownSignal, SupervisorEvent, SupervisorHandle
 let db = SupervisorHandle::start(SupervisorSpec::new("db").with_worker("pool", Service, RestartPolicy::Permanent))?;
 let web = SupervisorHandle::start(SupervisorSpec::new("web").with_worker("cache", Service, RestartPolicy::Permanent))?;
 
-let mut events = db.subscribe();
+let mut pool = db.monitor_child("pool");
 let _link = link(&db, "pool", &web, "cache");
 
 db.kill_child("pool").await?;
-assert!(matches!(events.recv().await?, SupervisorEvent::ChildTerminated { .. }));
+assert!(matches!(pool.recv().await, Some(SupervisorEvent::ChildTerminated { .. })));
 # db.shutdown().await?;
 # web.shutdown().await?;
 # Ok(())
 # }
 ```
 
-Every started child is reported terminated exactly once. Linked children share their fate: when one
-ends other than normally, the other is killed and restarted by its own supervisor.
+Every started child is reported terminated exactly once. `monitor()` and `monitor_child(id)` never
+miss an event: events queue until read, as with `erlang:monitor/2`. `subscribe()` is a bounded
+broadcast for logs and metrics, where a reader that falls far behind skips the oldest events.
+Linked children share their fate: when one ends other than normally, the other is killed and
+restarted by its own supervisor. Links are built on monitors, so none misses a termination.
 
 ## Blocking work
 
