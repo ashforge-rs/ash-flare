@@ -170,19 +170,29 @@ macro_rules! supervision_tree {
     };
 }
 
-/// Start a distributed supervisor server with TCP or Unix socket
+/// Start a distributed supervisor server with TCP or Unix socket.
+///
+/// Evaluates to the `JoinHandle` of the listening task. The server has no
+/// cookie; to require one, build a
+/// [`SupervisorServer`](crate::distributed::SupervisorServer) with
+/// `with_cookie` instead.
 ///
 /// # Examples
 ///
-/// ```ignore
-/// // Ignored due to requiring actual network binding
-/// use ash_flare::serve_supervisor;
+/// ```no_run
+/// use ash_flare::{serve_supervisor, SupervisorHandle, SupervisorSpec};
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let handle = SupervisorHandle::start(SupervisorSpec::new("app"))?;
 ///
 /// // TCP server
-/// serve_supervisor!(tcp, handle, "127.0.0.1:8080");
+/// let _tcp = serve_supervisor!(tcp, handle.clone(), "127.0.0.1:8080");
 ///
 /// // Unix socket server (Unix only)
-/// serve_supervisor!(unix, handle, "/tmp/supervisor.sock");
+/// let _unix = serve_supervisor!(unix, handle, "/tmp/supervisor.sock");
+/// # Ok(())
+/// # }
 /// ```
 #[macro_export]
 macro_rules! serve_supervisor {
@@ -196,27 +206,31 @@ macro_rules! serve_supervisor {
     }};
 }
 
-/// Connect to a remote supervisor via TCP or Unix socket
+/// A handle to a remote supervisor via TCP or Unix socket.
+///
+/// Evaluates to a
+/// [`RemoteSupervisorHandle`](crate::distributed::RemoteSupervisorHandle). No
+/// connection is made until its first command; add a cookie with
+/// `.with_cookie(...)`.
 ///
 /// # Examples
 ///
-/// ```ignore
-/// // Ignored due to requiring actual network connection
+/// ```
 /// use ash_flare::connect_supervisor;
 ///
-/// // Connect via TCP
-/// let remote = connect_supervisor!(tcp, "127.0.0.1:8080").await?;
+/// // Via TCP
+/// let remote = connect_supervisor!(tcp, "127.0.0.1:8080");
 ///
-/// // Connect via Unix socket (Unix only)
-/// let remote = connect_supervisor!(unix, "/tmp/supervisor.sock").await?;
+/// // Via a Unix socket (Unix only), authenticating with a cookie
+/// let remote = connect_supervisor!(unix, "/tmp/supervisor.sock").with_cookie("secret");
 /// ```
 #[macro_export]
 macro_rules! connect_supervisor {
     (tcp, $addr:expr) => {
-        $crate::distributed::RemoteSupervisorHandle::connect_tcp($addr)
+        $crate::distributed::RemoteSupervisorHandle::tcp($addr)
     };
     (unix, $path:expr) => {
-        $crate::distributed::RemoteSupervisorHandle::connect_unix($path)
+        $crate::distributed::RemoteSupervisorHandle::unix($path)
     };
 }
 
@@ -225,13 +239,23 @@ macro_rules! connect_supervisor {
 /// Evaluates to `Result<(SupervisorHandle, JoinHandle<..>), SupervisorError>`,
 /// failing if the described tree is invalid.
 ///
+/// The server has no cookie; to require one, build the tree and a
+/// [`SupervisorServer`](crate::distributed::SupervisorServer) with
+/// `with_cookie` instead.
+///
 /// # Examples
 ///
-/// ```ignore
-/// // Ignored due to requiring actual network binding
+/// ```no_run
 /// use ash_flare::distributed_system;
-///
-/// distributed_system! {
+/// # struct MyWorker;
+/// # impl MyWorker { fn new() -> Self { MyWorker } }
+/// # impl ash_flare::Worker for MyWorker {
+/// #     type Error = std::io::Error;
+/// #     async fn run(&mut self) -> Result<(), Self::Error> { Ok(()) }
+/// # }
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let (handle, _server) = distributed_system! {
 ///     server: tcp @ "127.0.0.1:8080" => {
 ///         name: "remote-app",
 ///         strategy: OneForOne,
@@ -240,7 +264,10 @@ macro_rules! connect_supervisor {
 ///         ],
 ///         supervisors: []
 ///     }
-/// }
+/// }?;
+/// # handle.shutdown().await?;
+/// # Ok(())
+/// # }
 /// ```
 #[macro_export]
 macro_rules! distributed_system {
