@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 
-use crate::supervisor::{AutoShutdown, Shutdown, ShutdownOrder};
+use crate::supervisor::{AutoShutdown, GiveUp, Shutdown, ShutdownOrder};
 
 use super::duration_from_secs;
 
@@ -121,6 +121,41 @@ impl PyAutoShutdown {
             AutoShutdown::Never => "AutoShutdown.never()".to_owned(),
             AutoShutdown::AnySignificant => "AutoShutdown.any_significant()".to_owned(),
             AutoShutdown::AllSignificant => "AutoShutdown.all_significant()".to_owned(),
+        }
+    }
+}
+
+/// What a top-level supervisor does when it gives up.
+#[pyclass(name = "GiveUp", from_py_object)]
+#[derive(Clone, Copy)]
+pub struct PyGiveUp {
+    pub(crate) inner: GiveUp,
+}
+
+#[pymethods]
+impl PyGiveUp {
+    /// Stop; `SupervisorHandle.wait()` reports it (the default).
+    #[staticmethod]
+    fn stop() -> Self {
+        Self {
+            inner: GiveUp::Stop,
+        }
+    }
+
+    /// Exit the process with `code` once the tree has shut down, so a
+    /// process supervisor restarts it. The interpreter does not clean up.
+    #[staticmethod]
+    fn exit_process(code: i32) -> Self {
+        Self {
+            inner: GiveUp::ExitProcess(code),
+        }
+    }
+
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn __repr__(&self) -> String {
+        match self.inner {
+            GiveUp::ExitProcess(code) => format!("GiveUp.exit_process({code})"),
+            _ => "GiveUp.stop()".to_owned(),
         }
     }
 }

@@ -2,14 +2,14 @@
 
 use super::error::SupervisorError;
 use super::runtime::{StatusSnapshot, SupervisorCommand, SupervisorRuntime};
-use super::spec::{ChildSpec, SupervisorSpec};
+use super::spec::{ChildSpec, GiveUp, SupervisorSpec};
 use crate::events::{EventSender, Monitor, SupervisorEvent, emit};
 use crate::restart::{RestartPolicy, RestartStrategy};
-use crate::types::{ChildId, ChildInfo};
+use crate::types::{ChildExitReason, ChildId, ChildInfo};
 use crate::worker::WorkerFactory;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// Handle used to interact with a running supervisor tree.
 ///
@@ -21,6 +21,8 @@ pub struct SupervisorHandle {
     pub(crate) instance: u64,
     pub(crate) control_tx: mpsc::UnboundedSender<SupervisorCommand>,
     events: EventSender,
+    /// Why the supervisor stopped, once it has.
+    stopped: watch::Receiver<Option<ChildExitReason>>,
 }
 
 impl SupervisorHandle {
@@ -55,18 +57,33 @@ impl SupervisorHandle {
     ) -> Self {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let events = EventSender::new();
+        let (stopped_tx, stopped_rx) = watch::channel(None);
         let name_arc: Arc<str> = Arc::from(spec.name.as_str());
-        let instance = crate::events::next_instance();
+        let handle = Self {
+            name: Arc::clone(&name_arc),
+            instance: crate::events::next_instance(),
+            control_tx: control_tx.clone(),
+            events: events.clone(),
+            stopped: stopped_rx,
+        };
+
+        // Registered before any child starts, so children can look up their
+        // own supervisor; the name goes when this run stops.
+        let registration = spec
+            .registration
+            .as_ref()
+            .map(|(registry, name)| registry.register(name.clone(), handle.clone()));
+        let give_up = spec.give_up;
+        let instance = handle.instance;
+
         let runtime = SupervisorRuntime::new(
             spec,
             Arc::clone(&name_arc),
             control_rx,
-            control_tx.clone(),
+            control_tx,
             events.clone(),
         );
 
-        let runtime_name = Arc::clone(&name_arc);
-        let runtime_events = events.clone();
         tokio::spawn(async move {
             // A panic in the runtime itself must still reach the parent, as an
             // abnormal exit, or the parent would keep a dead child forever.
@@ -74,29 +91,96 @@ impl SupervisorHandle {
                 .await
                 .unwrap_or_else(|message| {
                     tracing::error!(error = %message, "supervisor runtime panicked");
-                    crate::types::ChildExitReason::Abnormal
+                    ChildExitReason::Abnormal
                 });
-            tracing::debug!(name = %runtime_name, reason = ?reason, "supervisor stopped");
-            emit(&runtime_events, SupervisorEvent::Stopped { reason });
-            runtime_events.close();
+            tracing::debug!(name = %name_arc, reason = ?reason, "supervisor stopped");
+            drop(registration);
+            emit(&events, SupervisorEvent::Stopped { reason });
+            events.close();
+            stopped_tx.send_replace(Some(reason));
 
-            // A `Shutdown` reason is the parent's own doing and is ignored there;
-            // an abnormal exit is what makes the parent restart this subtree.
-            if let Some(tx) = parent_tx {
-                let _send = tx.send(SupervisorCommand::ChildTerminated {
-                    id: Arc::clone(&runtime_name),
-                    instance,
-                    reason,
-                });
+            match parent_tx {
+                // A `Shutdown` reason is the parent's own doing and is ignored
+                // there; an abnormal exit is what makes the parent restart
+                // this subtree.
+                Some(tx) => {
+                    let _send = tx.send(SupervisorCommand::ChildTerminated {
+                        id: Arc::clone(&name_arc),
+                        instance,
+                        reason,
+                    });
+                }
+                None => {
+                    if let (GiveUp::ExitProcess(code), ChildExitReason::Abnormal) =
+                        (give_up, reason)
+                    {
+                        tracing::error!(
+                            supervisor = %name_arc,
+                            code,
+                            "top-level supervisor gave up; exiting the process"
+                        );
+                        eprintln!(
+                            "ash-flare: supervisor '{name_arc}' gave up; exiting with status {code}"
+                        );
+                        std::process::exit(code);
+                    }
+                }
             }
         });
 
-        Self {
-            name: name_arc,
-            instance,
-            control_tx,
-            events,
+        handle
+    }
+
+    /// Waits until the supervisor has stopped, and returns why:
+    /// [`ChildExitReason::Shutdown`] when it was asked to stop,
+    /// [`ChildExitReason::Normal`] when it stopped itself through its
+    /// [`AutoShutdown`](crate::AutoShutdown), and
+    /// [`ChildExitReason::Abnormal`] when it gave up. Returns at once if it
+    /// has already stopped. Any number of tasks may wait.
+    ///
+    /// This is how a program learns that its top-level supervisor gave up:
+    ///
+    /// ```no_run
+    /// # use ash_flare::{ChildExitReason, SupervisorHandle, SupervisorSpec};
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// # let spec = SupervisorSpec::new("app");
+    /// let app = SupervisorHandle::start(spec).unwrap();
+    /// if app.wait().await == ChildExitReason::Abnormal {
+    ///     // Alert, flush what can be flushed, then exit for a restart.
+    ///     std::process::exit(1);
+    /// }
+    /// # }
+    /// ```
+    pub async fn wait(&self) -> ChildExitReason {
+        let mut stopped = self.stopped.clone();
+        match stopped.wait_for(Option::is_some).await {
+            Ok(reason) => reason.unwrap_or(ChildExitReason::Abnormal),
+            // The runtime task was lost without reporting; treat it as failed.
+            Err(_closed) => ChildExitReason::Abnormal,
         }
+    }
+
+    /// The handle of the nested supervisor with this id, for its current run.
+    ///
+    /// If the nested supervisor restarts, this handle refers to the run that
+    /// stopped and its commands fail with
+    /// [`SupervisorError::ShuttingDown`]; ask again for the new run, or give
+    /// the nested supervisor a
+    /// [registered name](SupervisorSpec::with_registered_name), which always
+    /// refers to the current run.
+    ///
+    /// # Errors
+    ///
+    /// - [`SupervisorError::ChildNotFound`] if there is no child with this id;
+    /// - [`SupervisorError::NotASupervisor`] if the child is a worker;
+    /// - [`SupervisorError::ShuttingDown`] if this supervisor has stopped.
+    pub async fn child_supervisor(&self, id: &str) -> Result<SupervisorHandle, SupervisorError> {
+        self.request(|respond_to| SupervisorCommand::GetChildSupervisor {
+            id: id.to_owned(),
+            respond_to,
+        })
+        .await?
     }
 
     /// Subscribes to this supervisor's [`SupervisorEvent`]s: children

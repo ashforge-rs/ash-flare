@@ -6,6 +6,8 @@ Runnable directly (``python python/tests/test_supervision_features.py``) as
 well as under pytest.
 """
 
+import subprocess
+import sys
 import threading
 import time
 
@@ -151,6 +153,56 @@ def test_remote_handle_accepts_a_cookie():
     except RuntimeError:
         return
     raise AssertionError("connecting to a missing socket must fail")
+
+
+def test_wait_reports_why_the_supervisor_stopped():
+    spec = SupervisorSpec("waited")
+    spec.add_worker("idle", RestartPolicy.permanent(), idle)
+    handle = SupervisorHandle.start(spec)
+    assert handle.wait(timeout=0.05) is None, "still running"
+    handle.shutdown()
+    assert handle.wait().is_shutdown()
+
+
+def test_child_supervisor_returns_a_nested_supervisor():
+    nested = SupervisorSpec("rooms")
+    nested.add_worker("lobby", RestartPolicy.permanent(), idle)
+    root = SupervisorSpec("root")
+    root.add_supervisor(nested)
+    handle = SupervisorHandle.start(root)
+
+    rooms = handle.child_supervisor("rooms")
+    assert rooms.name() == "rooms"
+    rooms.start_child("room-1", RestartPolicy.permanent(), idle)
+    assert len(rooms.which_children()) == 2
+    handle.shutdown()
+
+
+GIVE_UP_CHILD = """
+import time
+import ash_flare as af
+
+def broken():
+    raise RuntimeError("always fails")
+
+spec = af.SupervisorSpec("app")
+spec.with_restart_intensity(af.RestartIntensity(0, 5))
+spec.with_give_up(af.GiveUp.exit_process(42))
+spec.add_worker("broken", af.RestartPolicy.permanent(), broken)
+handle = af.SupervisorHandle.start(spec)
+time.sleep(10)
+raise SystemExit(3)
+"""
+
+
+def test_a_top_level_supervisor_can_exit_the_process_when_it_gives_up():
+    result = subprocess.run(
+        [sys.executable, "-c", GIVE_UP_CHILD],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 42, result
 
 
 if __name__ == "__main__":

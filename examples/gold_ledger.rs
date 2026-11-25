@@ -32,8 +32,9 @@
 //! 2. Kills come faster than the restart intensity allows; the treasury gives
 //!    up, leaving transfers half-done.
 //! 3. A new treasury opens on the same ledger and resumes every unfinished
-//!    transfer, as a parent supervisor restarting it would. (ash-flare does
-//!    not hand out handles to nested supervisors, so `main` plays the parent.)
+//!    transfer. Nested under a parent supervisor, the treasury would be
+//!    restarted by it; here `main` plays the parent, learning of the failure
+//!    through `SupervisorHandle::wait`, so the recovery step is explicit.
 //!
 //! After each phase the ledger is audited: every coin must be in a vault or in
 //! transit, every finished transfer must have exactly the records its outcome
@@ -44,9 +45,9 @@
 //! different run).
 
 use ash_flare::{
-    CallError, ChildSpec, Mailbox, MailboxConfig, MailboxHandle, Registration, Registry, Reply,
-    RestartBackoff, RestartIntensity, RestartPolicy, Shutdown, SupervisorEvent, SupervisorHandle,
-    SupervisorSpec, Worker, mailbox_named,
+    CallError, ChildExitReason, ChildSpec, Mailbox, MailboxConfig, MailboxHandle, Registration,
+    Registry, Reply, RestartBackoff, RestartIntensity, RestartPolicy, Shutdown, SupervisorEvent,
+    SupervisorHandle, SupervisorSpec, Worker, mailbox_named,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -891,16 +892,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kills = tokio::time::timeout(Duration::from_secs(30), meltdown_task)
         .await
         .map_err(|_| "the treasury did not give up within 30s")??;
-    while !treasury.handle.is_stopped() {
-        sleep(RETRY_DELAY).await;
-    }
+    let stopped = treasury.handle.wait().await;
     println!(
         "   dispatched {dispatched} of {} before the treasury went down",
         second.len()
     );
     println!(
         "   treasury:  {} after {kills} kills",
-        if treasury.gave_up.load(Ordering::Relaxed) {
+        if stopped == ChildExitReason::Abnormal && treasury.gave_up.load(Ordering::Relaxed) {
             "restart intensity exceeded, gave up"
         } else {
             "stopped"

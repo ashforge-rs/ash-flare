@@ -1,6 +1,7 @@
 //! Supervisor specification and builder
 
 use super::error::SupervisorError;
+use crate::registry::Registry;
 use crate::restart::{RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy};
 use crate::worker::{WorkerFactory, WorkerSpec};
 use std::collections::HashSet;
@@ -73,6 +74,27 @@ pub enum AutoShutdown {
     AnySignificant,
     /// Once every significant child has ended.
     AllSignificant,
+}
+
+/// What a top-level supervisor does when it gives up: when its children fail
+/// more often than its restart intensity allows, or its runtime panics.
+///
+/// A nested supervisor that gives up escalates to its parent, which applies
+/// its own restart policy. A top-level one has no parent; this says what
+/// happens instead.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GiveUp {
+    /// Stop. Whoever holds the handle finds out through
+    /// [`SupervisorHandle::wait`](crate::SupervisorHandle::wait), `is_stopped`
+    /// or the `Stopped` event, and decides what to do.
+    #[default]
+    Stop,
+    /// Once the tree has shut down, exit the process with this status code,
+    /// so the process supervisor (systemd, Kubernetes, a container runtime)
+    /// restarts it, as an OTP node shuts down when a permanent application
+    /// fails. Destructors of other tasks and threads do not run.
+    ExitProcess(i32),
 }
 
 /// Full specification of a worker child, for when the defaults of
@@ -197,6 +219,10 @@ pub struct SupervisorSpec {
     pub(crate) stall_threshold: Option<Duration>,
     /// How this supervisor is restarted when it is the child of another.
     pub(crate) restart_policy: RestartPolicy,
+    /// Where each run of this supervisor registers its handle, and under
+    /// what name.
+    pub(crate) registration: Option<(Registry, String)>,
+    pub(crate) give_up: GiveUp,
 }
 
 /// Default grace period a worker gets to stop cooperatively before being aborted.
@@ -216,6 +242,8 @@ impl SupervisorSpec {
             auto_shutdown: AutoShutdown::default(),
             stall_threshold: None,
             restart_policy: RestartPolicy::Permanent,
+            registration: None,
+            give_up: GiveUp::Stop,
         }
     }
 
@@ -242,7 +270,18 @@ impl SupervisorSpec {
                     self.validate_significant(worker)?;
                 }
                 ChildDef::Worker(_) => {}
-                ChildDef::Supervisor(nested) => nested.validate()?,
+                ChildDef::Supervisor(nested) => {
+                    if nested.give_up != GiveUp::Stop {
+                        return Err(SupervisorError::InvalidChildSpec {
+                            supervisor: self.name.clone(),
+                            child_id: nested.name.clone(),
+                            reason: "only a top-level supervisor can set GiveUp; a nested one \
+                                     escalates to its parent"
+                                .to_owned(),
+                        });
+                    }
+                    nested.validate()?;
+                }
             }
         }
         Ok(())
@@ -362,6 +401,49 @@ impl SupervisorSpec {
     #[must_use]
     pub fn with_restart_policy(mut self, policy: RestartPolicy) -> Self {
         self.restart_policy = policy;
+        self
+    }
+
+    /// Registers each run of this supervisor in `registry` under `name`, like
+    /// `supervisor:start_link({local, Name}, ...)` in OTP.
+    ///
+    /// The handle is registered before any child starts, so children can
+    /// find their own supervisor, and unregistered when the run stops. After a
+    /// restart the name refers to the new run, so looking it up always gives
+    /// the current one. This is how workers reach a nested supervisor, for
+    /// example to start children on it:
+    ///
+    /// ```
+    /// use ash_flare::{Registry, SupervisorHandle, SupervisorSpec};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let registry = Registry::new();
+    /// let app = SupervisorHandle::start(
+    ///     SupervisorSpec::new("app")
+    ///         .with_supervisor(SupervisorSpec::new("rooms").with_registered_name(&registry, "rooms")),
+    /// )
+    /// .unwrap();
+    ///
+    /// let rooms = registry.whereis::<SupervisorHandle>("rooms").unwrap();
+    /// assert_eq!(rooms.name(), "rooms");
+    /// # app.shutdown().await.unwrap();
+    /// # }
+    /// ```
+    ///
+    /// A registration replaces any earlier one of the same name.
+    #[must_use]
+    pub fn with_registered_name(mut self, registry: &Registry, name: impl Into<String>) -> Self {
+        self.registration = Some((registry.clone(), name.into()));
+        self
+    }
+
+    /// Sets what this supervisor does when it gives up, if it is a top-level
+    /// one. Defaults to [`GiveUp::Stop`]. Setting anything else on a nested
+    /// supervisor makes `SupervisorHandle::start` fail.
+    #[must_use]
+    pub fn with_give_up(mut self, give_up: GiveUp) -> Self {
+        self.give_up = give_up;
         self
     }
 

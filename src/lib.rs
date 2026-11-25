@@ -36,7 +36,11 @@
 //! - **Children**: [`Worker`], [`ChildSpec`] with per-child [`Shutdown`],
 //!   significant children and [`AutoShutdown`], worker pools.
 //! - **Failure handling**: panics are supervised like errors; [`ShutdownOrder`]
-//!   controls how children are stopped together.
+//!   controls how children are stopped together; [`GiveUp`] says what a
+//!   top-level supervisor does when it gives up, and
+//!   [`SupervisorHandle::wait`] reports why a supervisor stopped.
+//! - **Nested supervisors**: [`SupervisorSpec::with_registered_name`] and
+//!   [`SupervisorHandle::child_supervisor`].
 //! - **Monitoring**: [`SupervisorHandle::monitor`] for a lossless stream of
 //!   [`SupervisorEvent`]s, [`SupervisorHandle::subscribe`] for a lossy one,
 //!   [`link`] and [`SupervisorHandle::kill_child`].
@@ -86,7 +90,7 @@ pub use link::{Link, link};
 pub use registry::{Registration, Registry, RegistryError};
 pub use restart::{RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy};
 pub use supervisor::{
-    AutoShutdown, ChildSpec, Shutdown, ShutdownOrder, SupervisorError, SupervisorHandle,
+    AutoShutdown, ChildSpec, GiveUp, Shutdown, ShutdownOrder, SupervisorError, SupervisorHandle,
     SupervisorSpec,
 };
 pub use types::{ChildExitReason, ChildId, ChildInfo, ChildType, ShutdownSignal, WorkerContext};

@@ -15,6 +15,9 @@ pub enum SupervisorError {
     /// No child with this ID is supervised.
     #[error("child with id '{0}' not found - it may have already terminated")]
     ChildNotFound(String),
+    /// The child with this ID is a worker, not a nested supervisor.
+    #[error("child with id '{0}' is a worker, not a supervisor")]
+    NotASupervisor(String),
     /// Two children of one supervisor share an id.
     #[error("supervisor '{supervisor}' has more than one child with id '{child_id}'")]
     DuplicateChildId {

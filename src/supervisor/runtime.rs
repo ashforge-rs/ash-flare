@@ -43,6 +43,11 @@ pub(crate) enum SupervisorCommand {
     WhichChildren {
         respond_to: oneshot::Sender<Vec<ChildInfo>>,
     },
+    /// The handle of a nested supervisor child.
+    GetChildSupervisor {
+        id: ChildId,
+        respond_to: oneshot::Sender<Result<SupervisorHandle, SupervisorError>>,
+    },
     GetRestartStrategy {
         respond_to: oneshot::Sender<RestartStrategy>,
     },
@@ -223,6 +228,14 @@ impl SupervisorRuntime {
                 }
                 SupervisorCommand::WhichChildren { respond_to } => {
                     let result = self.handle_which_children();
+                    let _send = respond_to.send(result);
+                }
+                SupervisorCommand::GetChildSupervisor { id, respond_to } => {
+                    let result = match self.children.position(&id).map(|at| &self.children[at]) {
+                        Some(Child::Supervisor { handle, .. }) => Ok(handle.clone()),
+                        Some(Child::Worker(_)) => Err(SupervisorError::NotASupervisor(id)),
+                        None => Err(SupervisorError::ChildNotFound(id)),
+                    };
                     let _send = respond_to.send(result);
                 }
                 SupervisorCommand::GetRestartStrategy { respond_to } => {

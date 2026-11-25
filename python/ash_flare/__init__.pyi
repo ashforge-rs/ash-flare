@@ -134,6 +134,16 @@ class AutoShutdown:
     @staticmethod
     def all_significant() -> AutoShutdown: ...
 
+class GiveUp:
+    """What a top-level supervisor does when it gives up."""
+
+    @staticmethod
+    def stop() -> GiveUp:
+        """Stop; ``SupervisorHandle.wait()`` reports it (the default)."""
+    @staticmethod
+    def exit_process(code: int) -> GiveUp:
+        """Exit the process with ``code`` once the tree has shut down."""
+
 class SupervisorEvent:
     """Something that happened in a supervisor.
 
@@ -233,6 +243,9 @@ class SupervisorSpec:
     def with_restart_policy(self, policy: RestartPolicy) -> None:
         """How this supervisor is restarted when nested in another."""
 
+    def with_give_up(self, give_up: GiveUp) -> None:
+        """What a top-level supervisor does when it gives up."""
+
     def add_worker(
         self,
         id: str,
@@ -287,6 +300,13 @@ class SupervisorHandle:
 
     def kill_child(self, child_id: str) -> bool:
         """Kill a child as if it crashed, so its restart policy applies."""
+
+    def wait(self, timeout: Optional[float] = None) -> Optional[ChildExitReason]:
+        """Block until the supervisor has stopped and return why, or ``None``
+        if ``timeout`` seconds pass first."""
+
+    def child_supervisor(self, child_id: str) -> SupervisorHandle:
+        """The handle of a nested supervisor, for its current run."""
 
     def subscribe(self) -> EventStream: ...
     def terminate_child(self, child_id: str) -> None: ...

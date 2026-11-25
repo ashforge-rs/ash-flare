@@ -1,14 +1,23 @@
 //! A small chat service, structured the way it would be on the BEAM.
 //!
 //! ```text
-//! chat (one_for_one)          rooms (dynamic)        sessions (dynamic)
-//! ├── history  gen_server     ├── room:general       ├── user-alice
-//! └── lobby    gen_server     └── room:rust          ├── user-bob
-//!                                                    └── user-carol
+//! chat (one_for_one)
+//! ├── history      gen_server
+//! ├── sessions     supervisor, registered as "sessions"
+//! │   ├── user-alice
+//! │   └── user-bob …
+//! ├── rooms        supervisor, registered as "rooms"
+//! │   ├── room:general
+//! │   └── room:rust …
+//! └── lobby        gen_server
 //! ```
 //!
 //! - **history** stores messages per room, so they outlive a crashing room,
 //!   and saves them when the service stops (`Shutdown::Infinity`).
+//! - **sessions** and **rooms** are nested supervisors that start empty and
+//!   get children as users connect and rooms open. Each registers its handle
+//!   under its name, as OTP's `{local, Name}` does, so the processes that start
+//!   children on it look it up by name and always reach its current run.
 //! - **lobby** opens rooms on demand, starting each one as a child of `rooms`.
 //!   It keeps no state of its own: open rooms are found in the `Registry`.
 //! - **room** is a gen_server per room. It monitors its members through the
@@ -21,9 +30,9 @@
 //! Messages between processes are casts (`send`, or `try_send`, which like
 //! Erlang's `!` never blocks) and calls (`call` with a `Reply`).
 //!
-//! ash-flare does not hand out handles to nested supervisors, so the two
-//! dynamic supervisors are started on their own and given to the workers that
-//! start children on them; in OTP they would sit under `chat`.
+//! Stopping `chat` stops its children last-started first: the lobby, then
+//! every room, then every session, and the history last, once nothing can
+//! still write to it.
 //!
 //! Run with: `cargo run --example chat_server`
 
@@ -129,10 +138,15 @@ impl Worker for History {
 
 struct Lobby {
     inbox: Mailbox<LobbyMsg>,
-    rooms: SupervisorHandle,
-    sessions: SupervisorHandle,
     history: HistoryRef,
     registry: Registry,
+}
+
+/// A nested supervisor, looked up by its registered name.
+fn supervisor(registry: &Registry, name: &str) -> Result<SupervisorHandle, String> {
+    registry
+        .whereis::<SupervisorHandle>(name)
+        .ok_or_else(|| format!("the {name} supervisor is not running"))
 }
 
 impl Lobby {
@@ -141,6 +155,8 @@ impl Lobby {
         if let Some(existing) = self.registry.whereis::<RoomRef>(&key) {
             return Ok(existing);
         }
+        let rooms = supervisor(&self.registry, "rooms")?;
+        let sessions = supervisor(&self.registry, "sessions")?;
 
         // The room's mailbox outlives the room: its replacement after a crash
         // gets a clone, so every handle given out keeps working.
@@ -149,7 +165,7 @@ impl Lobby {
             room.to_owned(),
             self.registry.clone(),
             self.history.clone(),
-            self.sessions.clone(),
+            sessions,
             handle.clone(),
         );
         let factory = move || Room {
@@ -162,7 +178,7 @@ impl Lobby {
             _registered: registry.register(format!("room:{name}"), me.clone()),
         };
         // Waits for `initialize`, so the room is ready when the caller gets it.
-        self.rooms
+        rooms
             .start_child_linked(key, factory, RestartPolicy::Permanent, CALL_TIMEOUT)
             .await
             .map_err(|error| error.to_string())?;
@@ -429,8 +445,6 @@ impl Worker for Session {
 
 struct Chat {
     app: SupervisorHandle,
-    rooms: SupervisorHandle,
-    sessions: SupervisorHandle,
     lobby: LobbyRef,
     registry: Registry,
 }
@@ -438,17 +452,9 @@ struct Chat {
 impl Chat {
     fn start() -> Result<Self, Box<dyn std::error::Error>> {
         let registry = Registry::new();
-        let rooms = SupervisorHandle::start(SupervisorSpec::new("rooms"))?;
-        let sessions = SupervisorHandle::start(SupervisorSpec::new("sessions"))?;
-
         let (history, history_inbox) = mailbox_named(MailboxConfig::default(), "history");
         let (lobby, lobby_inbox) = mailbox_named(MailboxConfig::default(), "lobby");
-        let (lobby_rooms, lobby_sessions, lobby_history, lobby_registry) = (
-            rooms.clone(),
-            sessions.clone(),
-            history.clone(),
-            registry.clone(),
-        );
+        let (lobby_history, lobby_registry) = (history.clone(), registry.clone());
 
         let app = SupervisorHandle::start(
             SupervisorSpec::new("chat")
@@ -460,12 +466,16 @@ impl Chat {
                     // Never cut short while saving.
                     .shutdown(Shutdown::Infinity),
                 )
+                .with_supervisor(
+                    SupervisorSpec::new("sessions").with_registered_name(&registry, "sessions"),
+                )
+                .with_supervisor(
+                    SupervisorSpec::new("rooms").with_registered_name(&registry, "rooms"),
+                )
                 .with_worker(
                     "lobby",
                     move || Lobby {
                         inbox: lobby_inbox.clone(),
-                        rooms: lobby_rooms.clone(),
-                        sessions: lobby_sessions.clone(),
                         history: lobby_history.clone(),
                         registry: lobby_registry.clone(),
                     },
@@ -475,11 +485,13 @@ impl Chat {
 
         Ok(Self {
             app,
-            rooms,
-            sessions,
             lobby,
             registry,
         })
+    }
+
+    fn supervisor(&self, name: &str) -> Result<SupervisorHandle, String> {
+        supervisor(&self.registry, name)
     }
 
     /// A user connects: start a session process for them.
@@ -492,7 +504,7 @@ impl Chat {
             handle.clone(),
             self.lobby.clone(),
             self.registry.clone(),
-            self.rooms.clone(),
+            self.supervisor("rooms")?,
         );
         let factory = move || Session {
             user: name.clone(),
@@ -507,16 +519,14 @@ impl Chat {
             _registered: None,
         };
         // Temporary: a session that ends, for whatever reason, stays ended.
-        self.sessions
+        self.supervisor("sessions")?
             .start_child_linked(id, factory, RestartPolicy::Temporary, CALL_TIMEOUT)
             .await?;
         Ok(handle)
     }
 
-    /// Stops the service: users first, then rooms, then the core.
+    /// Stops the service, children last-started first.
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.sessions.shutdown().await?;
-        self.rooms.shutdown().await?;
         self.app.shutdown().await?;
         Ok(())
     }
@@ -576,7 +586,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     say(&carol, "/join general").await?;
 
     step("bob's connection drops; alice quits");
-    chat.sessions.kill_child("user-bob").await?;
+    chat.supervisor("sessions")?.kill_child("user-bob").await?;
     sleep(Duration::from_millis(50)).await;
     say(&carol, "/msg bob are you there?").await?;
     say(&alice, "/quit").await?;

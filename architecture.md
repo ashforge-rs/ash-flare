@@ -99,6 +99,18 @@ Every termination is reported exactly once: a child that exits on its own report
 the supervisor stops is reported by the supervisor, which then silences the child's own report; a
 killed child sends no report.
 
+Events go out two ways. Each `Monitor` (and so each link) has its own unbounded queue and receives
+every event; `subscribe` receivers share a bounded broadcast and skip the oldest events when they fall
+behind. Monitors end after the supervisor's `Stopped` event.
+
+## Escalation
+
+A supervisor that exceeds its restart intensity stops its children and exits `Abnormal`. A nested one
+reports that to its parent, which applies the nested supervisor's restart policy; one that stopped
+itself through `AutoShutdown` exits `Normal`. A top-level supervisor has no parent: `wait()` resolves
+with the reason, and `GiveUp::ExitProcess` exits the process once the tree is down. A supervisor with
+a registered name registers each run before starting its children and unregisters when the run ends.
+
 ## Shutdown
 
 Children stopped together, on supervisor shutdown or a `OneForAll` / `RestForOne` restart, are stopped

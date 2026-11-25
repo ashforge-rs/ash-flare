@@ -113,6 +113,7 @@ fn ash_flare(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<options::PyShutdown>()?;
     m.add_class::<options::PyShutdownOrder>()?;
     m.add_class::<options::PyAutoShutdown>()?;
+    m.add_class::<options::PyGiveUp>()?;
 
     // Events and links
     m.add_class::<events::PySupervisorEvent>()?;

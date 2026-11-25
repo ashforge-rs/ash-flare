@@ -38,7 +38,9 @@ This is a major release; see "Migrating from 3.x" in the README.
 - `SupervisorSpec::with_worker_pool` and `SupervisorHandle::start_unique_child`.
 - `ChildSpec::isolated` and `SupervisorSpec::with_stall_detection`.
 - Cookie authentication for remote supervisors (`SupervisorServer::with_cookie`, `RemoteSupervisorHandle::with_cookie`).
-- `SupervisorHandle::is_stopped`; `WorkerFactory`; `mailbox` and `mailbox_named` at the crate root.
+- `SupervisorHandle::is_stopped` and `wait`; `WorkerFactory`; `mailbox` and `mailbox_named` at the crate root.
+- `SupervisorSpec::with_registered_name` and `SupervisorHandle::child_supervisor` for reaching nested supervisors.
+- `GiveUp` and `SupervisorSpec::with_give_up`: a top-level supervisor that gives up can exit the process.
 
 ### Fixed
 
@@ -61,6 +63,7 @@ This is a major release; see "Migrating from 3.x" in the README.
 - `add_worker` accepts `shutdown=` and `significant=`; specs gain `with_shutdown_order`, `with_auto_shutdown` and `with_restart_policy`.
 - Handles gain `kill_child`, `subscribe` (lossless) and `start_unique_child`; `link` links two children.
 - `RemoteSupervisorHandle` accepts `cookie=` and gains `status`.
+- Handles gain `wait` and `child_supervisor`; specs gain `with_give_up`.
 - `SupervisorHandle.start` raises `ValueError` for an invalid spec; `shutdown` blocks until the tree has stopped.
 
 ### Dependencies

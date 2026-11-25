@@ -15,8 +15,10 @@ use crate::supervisor::{ChildSpec, SupervisorHandle, SupervisorSpec};
 use crate::types::{ChildType, ShutdownSignal};
 
 use super::events::PyEventStream;
-use super::options::{PyAutoShutdown, PyShutdown, PyShutdownOrder};
-use super::types::{PyChildInfo, PyRestartIntensity, PyRestartPolicy, PyRestartStrategy};
+use super::options::{PyAutoShutdown, PyGiveUp, PyShutdown, PyShutdownOrder};
+use super::types::{
+    PyChildExitReason, PyChildInfo, PyRestartIntensity, PyRestartPolicy, PyRestartStrategy,
+};
 use super::worker::{PyWorker, PyWorkerFn};
 use super::{block_on_without_gil, duration_from_secs, ensure_callable, get_runtime};
 
@@ -108,6 +110,11 @@ impl PySupervisorSpec {
     /// Makes the supervisor stop itself when its significant children end.
     fn with_auto_shutdown(&mut self, auto_shutdown: PyAutoShutdown) {
         self.inner.auto_shutdown = auto_shutdown.inner;
+    }
+
+    /// What this supervisor does when it gives up, if it is a top-level one.
+    fn with_give_up(&mut self, give_up: PyGiveUp) {
+        self.inner.give_up = give_up.inner;
     }
 
     /// How this supervisor is restarted when nested in another.
@@ -281,6 +288,31 @@ impl PySupervisorHandle {
         let handle = self.inner.clone();
         block_on_without_gil(py, async move { handle.kill_child(&child_id).await })
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to kill child: {e}")))
+    }
+
+    /// Blocks until the supervisor has stopped, and returns why; `None` if
+    /// `timeout` seconds pass first.
+    #[pyo3(signature = (timeout=None))]
+    fn wait(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Option<PyChildExitReason>> {
+        let limit = timeout
+            .map(|seconds| duration_from_secs(seconds, "timeout"))
+            .transpose()?;
+        let handle = self.inner.clone();
+        let reason = block_on_without_gil(py, async move {
+            match limit {
+                Some(wait) => tokio::time::timeout(wait, handle.wait()).await.ok(),
+                None => Some(handle.wait().await),
+            }
+        });
+        Ok(reason.map(|inner| PyChildExitReason { inner }))
+    }
+
+    /// The handle of the nested supervisor with this id, for its current run.
+    fn child_supervisor(&self, py: Python<'_>, child_id: String) -> PyResult<Self> {
+        let handle = self.inner.clone();
+        block_on_without_gil(py, async move { handle.child_supervisor(&child_id).await })
+            .map(|inner| Self { inner })
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to get child supervisor: {e}")))
     }
 
     /// A stream of this supervisor's events.

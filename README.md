@@ -9,7 +9,8 @@ Fault-tolerant supervision trees for Rust, modelled on Erlang/OTP, with Python b
 - Workers of different types in one tree; panics are supervised like any other failure
 - OTP shutdown semantics: reverse start order, per-child `BrutalKill` / `Timeout` / `Infinity`
 - Significant children and `auto_shutdown`
-- Events for monitoring, links between children, and killing children
+- Nested supervisors reachable by registered name, and a policy for when the whole tree gives up
+- Lossless monitors, links between children, and killing children
 - Typed mailboxes with call/cast that survive restarts, and a name registry
 - Worker pools and children started under generated ids
 - Isolated workers and stall detection for blocking or CPU-bound work
@@ -97,6 +98,38 @@ let spec = SupervisorSpec::new("app")
 Children are stopped in reverse start order, each within its own shutdown setting
 (`ShutdownOrder::Concurrent` stops them together). A worker's `shutdown` hook runs unless it is
 killed or overruns its timeout. Nested supervisors are added with `with_supervisor`.
+
+## The top of the tree
+
+```rust
+use ash_flare::{ChildExitReason, GiveUp, Registry, SupervisorHandle, SupervisorSpec};
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let registry = Registry::new();
+let app = SupervisorHandle::start(
+    SupervisorSpec::new("app")
+        // When the whole tree fails, exit so systemd or Kubernetes restarts the process.
+        .with_give_up(GiveUp::ExitProcess(1))
+        .with_supervisor(SupervisorSpec::new("rooms").with_registered_name(&registry, "rooms")),
+)?;
+
+// A nested supervisor, by registered name (always its current run) or by child id.
+let rooms = registry.whereis::<SupervisorHandle>("rooms").unwrap();
+let same = app.child_supervisor("rooms").await?;
+# assert_eq!(rooms.name(), same.name());
+
+app.shutdown().await?;
+assert_eq!(app.wait().await, ChildExitReason::Shutdown);
+# Ok(())
+# }
+```
+
+A nested supervisor that gives up escalates to its parent. A top-level one stops, and `wait()` tells
+whoever holds its handle why; with `GiveUp::ExitProcess` it also exits the process once the tree is
+down, as an OTP node does when a permanent application fails. `with_registered_name` registers each
+run of a supervisor before its children start, so workers can find their own or a sibling supervisor
+by name, as with `{local, Name}` in OTP.
 
 ## Messaging
 
