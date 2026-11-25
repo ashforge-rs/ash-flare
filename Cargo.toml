@@ -188,3 +188,7 @@ path = "examples/connection_handlers.rs"
 [[example]]
 name = "secure_remote"
 path = "examples/secure_remote.rs"
+
+[[example]]
+name = "chat_server"
+path = "examples/chat_server.rs"
