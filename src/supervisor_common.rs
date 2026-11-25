@@ -39,8 +39,7 @@ pub(crate) enum RestartDecision {
 /// restart-intensity accounting, and backoff. It is deliberately free of any
 /// runtime types so it can be unit-tested in isolation.
 ///
-/// `policy` is `None` for nested supervisors, which are always treated as
-/// permanent.
+/// A `policy` of `None` is treated as permanent.
 pub(crate) fn decide_restart(
     policy: Option<RestartPolicy>,
     reason: ChildExitReason,
@@ -59,7 +58,6 @@ pub(crate) fn decide_restart(
         return RestartDecision::Ignore;
     }
 
-    // Nested supervisors have no policy of their own and are always permanent.
     let should_restart = match policy {
         None | Some(RestartPolicy::Permanent) => true,
         Some(RestartPolicy::Temporary) => false,

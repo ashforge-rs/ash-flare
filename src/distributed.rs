@@ -5,16 +5,24 @@
 //!
 //! # Security
 //!
-//! **This protocol has no authentication, authorization, or encryption.** Any
-//! peer able to open a connection can enumerate children, terminate an
-//! individual child, or shut the whole supervision tree down via
-//! [`RemoteCommand::Shutdown`]. Traffic is sent in the clear.
+//! Without a cookie, **any peer able to open a connection** can enumerate
+//! children, terminate an individual child, or shut the whole supervision tree
+//! down via [`RemoteCommand::Shutdown`].
 //!
-//! Only listen on an interface you fully control. Prefer
+//! Give the server and its clients a shared secret with
+//! [`SupervisorServer::with_cookie`] and [`RemoteSupervisorHandle::with_cookie`],
+//! like an Erlang distribution cookie. Each connection then starts with a
+//! challenge-response handshake (HMAC-SHA256 over random nonces) in which both
+//! ends prove they know the cookie without sending it; a client that cannot is
+//! refused before any command runs, and a client refuses a server that cannot.
+//!
+//! The cookie authenticates; it does not encrypt. Commands and replies after
+//! the handshake travel in the clear and are not integrity-protected, and there
+//! is no authorization beyond knowing the cookie. Prefer
 //! [`SupervisorServer::listen_unix`] with restrictive filesystem permissions;
-//! if you use [`SupervisorServer::listen_tcp`], bind to loopback or place the
-//! listener behind an authenticated transport such as a VPN, SSH tunnel, or
-//! mutual-TLS proxy. Do not expose it to an untrusted network.
+//! for [`SupervisorServer::listen_tcp`], bind to loopback or a private network,
+//! or place the listener behind an encrypted transport such as a VPN, SSH
+//! tunnel, or TLS proxy. Do not expose it to an untrusted network.
 //!
 //! Incoming frames are length-bounded and validated before access, so a
 //! malformed payload is rejected as an error rather than causing undefined
@@ -356,9 +364,9 @@ impl SupervisorServer {
     ///
     /// # Security
     ///
-    /// Connections are **not authenticated**. Access is governed solely by the
-    /// filesystem permissions on `path`; restrict them to the intended user.
-    /// See the [module documentation](self#security).
+    /// Without a [cookie](Self::with_cookie), access is governed solely by the
+    /// filesystem permissions on `path`; restrict them to the intended user
+    /// either way. See the [module documentation](self#security).
     ///
     /// # Errors
     ///
@@ -391,10 +399,11 @@ impl SupervisorServer {
     ///
     /// # Security
     ///
-    /// Connections are **not authenticated or encrypted**. Any peer that can
-    /// reach `addr` may terminate children or shut down the supervision tree.
-    /// Bind to loopback, or front this with an authenticated transport. See the
-    /// [module documentation](self#security).
+    /// Without a [cookie](Self::with_cookie), any peer that can reach `addr`
+    /// may terminate children or shut down the supervision tree. With one,
+    /// peers must authenticate, but traffic is still not encrypted. Bind to
+    /// loopback or a private network, or front this with an encrypted
+    /// transport. See the [module documentation](self#security).
     ///
     /// # Errors
     ///

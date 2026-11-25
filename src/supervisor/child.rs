@@ -53,8 +53,8 @@ impl Child {
         }
     }
 
-    /// The child's restart policy: `None` for nested supervisors, which have no
-    /// policy of their own and are always treated as permanent.
+    /// The child's restart policy as reported in `ChildInfo`: `None` for
+    /// nested supervisors. Restart decisions use [`policy`](Self::policy).
     #[inline]
     pub fn restart_policy(&self) -> Option<RestartPolicy> {
         match self {
