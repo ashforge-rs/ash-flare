@@ -156,3 +156,35 @@ path = "examples/mailbox_p2p.rs"
 [[example]]
 name = "mailbox_macro"
 path = "examples/mailbox_macro.rs"
+
+[[example]]
+name = "kv_server"
+path = "examples/kv_server.rs"
+
+[[example]]
+name = "graceful_shutdown"
+path = "examples/graceful_shutdown.rs"
+
+[[example]]
+name = "supervisor_events"
+path = "examples/supervisor_events.rs"
+
+[[example]]
+name = "blocking_workers"
+path = "examples/blocking_workers.rs"
+
+[[example]]
+name = "linked_services"
+path = "examples/linked_services.rs"
+
+[[example]]
+name = "batch_job"
+path = "examples/batch_job.rs"
+
+[[example]]
+name = "connection_handlers"
+path = "examples/connection_handlers.rs"
+
+[[example]]
+name = "secure_remote"
+path = "examples/secure_remote.rs"
