@@ -10,14 +10,22 @@ This example demonstrates:
 
 Python equivalent of: examples/cluster_control.rs
 
-Note: This requires supervisors to be running with distributed servers.
-You can start them using the distributed.rs Rust example or create
-Python supervisors with server support.
+Start the regional supervisors first, each in its own terminal:
+
+    cargo run --example cluster_control -- region us-west
+    cargo run --example cluster_control -- region eu-west
+
+They require a cookie, read from ASH_FLARE_COOKIE on both sides, with the
+same fixed fallback for the demo.
 """
 
-import ash_flare as af
-import time
+import os
 import sys
+import time
+
+import ash_flare as af
+
+COOKIE = os.environ.get("ASH_FLARE_COOKIE", "ash-flare-demo-cookie")
 
 
 def query_region(region_name, remote_handle):
@@ -51,16 +59,16 @@ def main():
     print(f"  EU-West: {eu_west_path}\n")
     
     try:
-        us_west = af.RemoteSupervisorHandle.connect_unix(us_west_path)
+        us_west = af.RemoteSupervisorHandle.connect_unix(us_west_path, cookie=COOKIE)
         print("✓ Connected to US-West regional supervisor")
     except Exception as e:
         print(f"✗ Failed to connect to US-West: {e}")
         print("\nHint: Start a supervisor server first:")
-        print("  cargo run --example distributed")
+        print("  cargo run --example cluster_control -- region us-west")
         sys.exit(1)
     
     try:
-        eu_west = af.RemoteSupervisorHandle.connect_unix(eu_west_path)
+        eu_west = af.RemoteSupervisorHandle.connect_unix(eu_west_path, cookie=COOKIE)
         print("✓ Connected to EU-West regional supervisor")
     except Exception as e:
         print(f"✗ Failed to connect to EU-West: {e}")

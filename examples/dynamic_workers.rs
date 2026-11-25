@@ -1,9 +1,14 @@
 //! Elastic worker pool example - scaling workers dynamically based on workload
+//!
+//! A pool manager adds workers as work arrives with
+//! `SupervisorHandle::start_unique_child`, which picks a free id
+//! (`dynamic-worker-0`, `dynamic-worker-1`, ...) so the manager does not have
+//! to keep a counter of its own.
 
-use ash_flare::{RestartPolicy, SupervisorHandle, impl_worker_stateful, supervision_tree};
-use std::sync::Arc;
+use ash_flare::{
+    ChildSpec, RestartPolicy, SupervisorHandle, impl_worker_stateful, supervision_tree,
+};
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 #[derive(Debug)]
@@ -19,14 +24,12 @@ impl std::error::Error for WorkerError {}
 
 #[derive(Clone)]
 struct TaskWorker {
-    worker_id: usize,
     task_type: String,
 }
 
 impl TaskWorker {
-    fn new(worker_id: usize, task_type: impl Into<String>) -> Self {
+    fn new(task_type: impl Into<String>) -> Self {
         Self {
-            worker_id,
             task_type: task_type.into(),
         }
     }
@@ -34,19 +37,13 @@ impl TaskWorker {
 
 impl_worker_stateful! {
     TaskWorker, WorkerError => |self| {
-        println!(
-            "[Worker {}] Started - Type: {}",
-            self.worker_id, self.task_type
-        );
+        println!("[{}] Started", self.task_type);
 
         for i in 0..8 {
             sleep(Duration::from_millis(800)).await;
-            println!(
-                "[Worker {}] Processing {} task #{}",
-                self.worker_id, self.task_type, i + 1
-            );
+            println!("[{}] Processing task #{}", self.task_type, i + 1);
         }
-        println!("[Worker {}] Work completed", self.worker_id);
+        println!("[{}] Work completed", self.task_type);
         Ok(())
     }
 }
@@ -61,31 +58,24 @@ impl WorkloadMonitorWrapper {
         Self { supervisor }
     }
 
-    async fn add_worker(
-        &self,
-        counter: &Arc<Mutex<usize>>,
-        task_type: &str,
-    ) -> Result<(), WorkerError> {
-        let mut cnt = counter.lock().await;
-        *cnt += 1;
-        let worker_id = *cnt;
-        drop(cnt);
-
-        println!(
-            "\n[Pool Manager] ➕ Scaling up: adding worker {} for {}",
-            worker_id, task_type
-        );
-
+    async fn add_worker(&self, task_type: &str) -> Result<(), WorkerError> {
         let task_type_owned = task_type.to_string();
-        self.supervisor
-            .start_child(
-                format!("dynamic-worker-{}", worker_id),
-                move || TaskWorker::new(worker_id, task_type_owned.clone()),
-                RestartPolicy::Transient,
-            )
+        let worker = ChildSpec::new("dynamic-worker", move || {
+            TaskWorker::new(task_type_owned.clone())
+        })
+        .restart(RestartPolicy::Transient);
+
+        // The spec's id is a prefix; the supervisor returns the id it chose.
+        let id = self
+            .supervisor
+            .start_unique_child(worker)
             .await
             .map_err(|e| WorkerError(format!("Failed to start worker: {}", e)))?;
 
+        println!(
+            "\n[Pool Manager] ➕ Scaling up: started {} for {}",
+            id, task_type
+        );
         Ok(())
     }
 
@@ -108,23 +98,21 @@ impl_worker_stateful! {
     WorkloadMonitorWrapper, WorkerError => |self| {
         println!("[Pool Manager] Starting elastic pool management\n");
 
-        let counter = Arc::new(Mutex::new(0));
-
         sleep(Duration::from_secs(1)).await;
 
-        self.add_worker(&counter, "data-processing").await?;
+        self.add_worker("data-processing").await?;
         sleep(Duration::from_secs(2)).await;
 
-        self.add_worker(&counter, "image-processing").await?;
+        self.add_worker("image-processing").await?;
         sleep(Duration::from_secs(2)).await;
 
         self.check_workload().await?;
         sleep(Duration::from_secs(2)).await;
 
-        self.add_worker(&counter, "video-encoding").await?;
+        self.add_worker("video-encoding").await?;
         sleep(Duration::from_secs(2)).await;
 
-        self.add_worker(&counter, "report-generation").await?;
+        self.add_worker("report-generation").await?;
         sleep(Duration::from_secs(2)).await;
 
         self.check_workload().await?;
