@@ -209,6 +209,11 @@ thread. `ChildSpec::isolated(true)` runs a worker on a thread of its own, and
 `SupervisorSpec::with_stall_detection(threshold)` reports workers stuck in a poll as
 `SupervisorEvent::ChildStalled`.
 
+Stopping or killing a worker takes effect at its next await point. An isolated worker stuck in a loop
+that never awaits is reported as killed and replaced, but its old thread runs on until it yields, so
+the old and new instance can briefly run side by side. Run code that may never yield in a separate
+process if that matters.
+
 ## Remote control
 
 ```rust,no_run
@@ -227,8 +232,10 @@ println!("{:?}", remote.status().await?);
 # }
 ```
 
-Both ends authenticate with the cookie; traffic is not encrypted. Bind to loopback or a Unix socket,
-or put the listener behind an authenticated transport.
+Both ends prove they know the cookie without sending it; a client without it is refused before any
+command runs. Traffic after the handshake is not encrypted or integrity-protected, and anyone with the
+cookie may run any command, including `shutdown`. Bind to loopback or a Unix socket with restrictive
+permissions, or put the listener behind an encrypted transport such as a VPN, SSH tunnel or TLS proxy.
 
 ## Python
 
@@ -251,6 +258,11 @@ Each Python worker runs on its own thread, and blocking calls release the GIL. C
 is still serialised by the interpreter; use processes or Rust for parallel computation. Worker
 exceptions are logged through the `ash_flare` logger with their traceback.
 
+`subscribe()` misses no event. `SupervisorHandle.wait(timeout=None)` blocks until a supervisor stops
+and returns why; `SupervisorSpec.with_give_up(GiveUp.exit_process(1))` exits the process when a
+top-level supervisor gives up. A nested supervisor is reached with `handle.child_supervisor(id)`, or by
+`SupervisorHandle.whereis(name)` after `with_registered_name(name)`.
+
 ## Migrating from 3.x
 
 - Remove `#[async_trait]` from `impl Worker`; `SupervisorSpec`, `SupervisorHandle` and `SupervisorServer` are no longer generic.
@@ -259,6 +271,9 @@ exceptions are logged through the `ash_flare` logger with their traceback.
 - `SupervisorHandle::start` returns `Result`; `shutdown` waits for the tree to stop.
 - Children stop in reverse start order by default.
 - `ChildExitReason`, `SupervisorError` and `DistributedError` are `#[non_exhaustive]`.
+- `ChildInfo::restart_policy` is `Some` for nested supervisors too, with their own policy.
+- `RemoteSupervisorHandle::connect_tcp` / `connect_unix` are replaced by `tcp` / `unix`, which connect on
+  the first command; `connect_supervisor!` no longer needs `.await?`.
 - Remote clients and servers must both be 4.x.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full list.

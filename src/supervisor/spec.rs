@@ -366,11 +366,15 @@ impl SupervisorSpec {
     /// On termination each worker is sent a [`ShutdownSignal`](crate::ShutdownSignal);
     /// a worker that returns from `run` within this window also gets its
     /// [`shutdown`](crate::Worker::shutdown) hook run. A worker that ignores the
-    /// signal is aborted and does **not** get the hook. When several children
-    /// stop together (supervisor shutdown, or a `OneForAll` or `RestForOne`
-    /// restart) they share
-    /// one timeout instead of each waiting in turn. Defaults to 5 seconds;
-    /// `Duration::ZERO` aborts immediately.
+    /// signal is aborted and does **not** get the hook. This is the default
+    /// for children whose [`ChildSpec`] sets no [`Shutdown`] of its own.
+    ///
+    /// When several children stop together (supervisor shutdown, or a
+    /// `OneForAll` or `RestForOne` restart), each gets its own timeout. With
+    /// the default [`ShutdownOrder::Reverse`] they are stopped one after
+    /// another, so the stop as a whole can take the sum of their timeouts;
+    /// with [`ShutdownOrder::Concurrent`] their timeouts run side by side.
+    /// Defaults to 5 seconds; `Duration::ZERO` aborts immediately.
     #[must_use]
     pub fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = timeout;

@@ -2,7 +2,10 @@
 //!
 //! A worker registers something others can use to reach it, typically its
 //! [`MailboxHandle`](crate::MailboxHandle), under a name. Anyone holding the
-//! [`Registry`] can then look it up by name and type.
+//! [`Registry`] can then look it up by name and type. Supervisors register
+//! their [`SupervisorHandle`](crate::SupervisorHandle) the same way, for each
+//! run, with
+//! [`SupervisorSpec::with_registered_name`](crate::SupervisorSpec::with_registered_name).
 //!
 //! Registering returns a [`Registration`] guard; dropping it removes the name.
 //! Keep the guard in the worker so the name lives exactly as long as that

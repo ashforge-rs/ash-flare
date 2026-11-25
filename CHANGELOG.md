@@ -22,7 +22,7 @@ This is a major release; see "Migrating from 3.x" in the README.
 - `ChildInfo::restart_policy` reports a nested supervisor's own policy instead of `None`.
 - `Mailbox::recv` and `try_recv` take `&self`.
 - `distributed::ChildInfo` is replaced by the crate-level `ChildInfo`; `SupervisorStatus::restart_strategy` is a `RestartStrategy`.
-- `RemoteSupervisorHandle::connect_tcp` / `connect_unix` are replaced by the `tcp` / `unix` constructors.
+- `RemoteSupervisorHandle::connect_tcp` / `connect_unix` are replaced by the `tcp` / `unix` constructors, which connect on the first command; `connect_supervisor!` evaluates to the handle instead of a future.
 - Connections start with a versioned handshake; 3.x clients and servers cannot talk to 4.x.
 - `distributed_system!` evaluates to a `Result`.
 

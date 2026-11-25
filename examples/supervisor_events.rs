@@ -9,6 +9,10 @@
 //! - A supervisor giving up once its restart intensity is exceeded, and
 //!   `SupervisorHandle::is_stopped` afterwards
 //!
+//! This prints events, so it uses `subscribe`, which may skip events for a
+//! reader that falls far behind. To act on events, use `monitor()` or
+//! `monitor_child(id)` instead, which never miss one.
+//!
 //! A flaky sensor alternately returns an error and panics. The supervisor
 //! allows 3 restarts within 5 seconds; the fourth failure makes it give up.
 //!

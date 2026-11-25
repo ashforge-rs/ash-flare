@@ -32,8 +32,13 @@ impl SupervisorHandle {
     ///
     /// # Errors
     ///
-    /// Returns [`SupervisorError::DuplicateChildId`] if two children of any
-    /// supervisor in the tree share an id. Nothing is started in that case.
+    /// Nothing is started if the tree is invalid:
+    ///
+    /// - [`SupervisorError::DuplicateChildId`] if two children of any
+    ///   supervisor in the tree share an id;
+    /// - [`SupervisorError::InvalidChildSpec`] if a significant child is
+    ///   `Permanent` or its supervisor has no `AutoShutdown`, or a nested
+    ///   supervisor sets a [`GiveUp`](crate::GiveUp) other than `Stop`.
     pub fn start(spec: SupervisorSpec) -> Result<Self, SupervisorError> {
         spec.validate()?;
         Ok(Self::start_inner(spec, None))
@@ -324,7 +329,8 @@ impl SupervisorHandle {
     ///
     /// This method waits for the worker's [`initialize`](crate::Worker::initialize)
     /// to complete before returning. If initialization fails or times out, an
-    /// error is returned and the worker is not added.
+    /// error is returned and the worker is not added. The supervisor serves no
+    /// other command while it waits, so keep `initialize` and `timeout` short.
     ///
     /// # Errors
     ///
@@ -413,10 +419,12 @@ impl SupervisorHandle {
 
     /// Shuts the supervisor tree down and waits until it has stopped.
     ///
-    /// Every child is asked to stop at once, and the children share one
-    /// shutdown timeout, so a slow cleanup in one child does not delay the
-    /// others. Nested supervisors are shut down the same way. When this returns, all `shutdown` hooks that were going to
-    /// run have run.
+    /// Children are stopped in the supervisor's
+    /// [`ShutdownOrder`](crate::ShutdownOrder): by default one at a time, last
+    /// started first, each within its own [`Shutdown`](crate::Shutdown)
+    /// setting; with `Concurrent`, all at once. A nested supervisor stops its
+    /// own children the same way before it counts as stopped. When this
+    /// returns, all `shutdown` hooks that were going to run have run.
     ///
     /// # Errors
     ///
