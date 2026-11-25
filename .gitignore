@@ -3,6 +3,7 @@
 # Shell scripts and recordings
 *.sh
 !lint.sh
+!run_examples.sh
 *.cast
 # Python
 .venv/

@@ -1,4 +1,4 @@
-.PHONY: help publish check test bench bench-baseline bench-compare clean tag release release-patch release-minor release-major \
+.PHONY: help publish check test examples msrv bench bench-baseline bench-compare clean tag release release-patch release-minor release-major \
         dry-run pre-commit fmt lint doc build python-venv python-build python-install \
         python-dev python-clean python-test
 
@@ -16,6 +16,8 @@ help:
 	@echo "  check            - Run cargo check"
 	@echo "  build            - Build the project"
 	@echo "  test             - Run tests"
+	@echo "  examples         - Run every example that finishes on its own"
+	@echo "  msrv             - Check all targets build on the minimum supported Rust (1.88)"
 	@echo "  fmt              - Format code with rustfmt"
 	@echo "  lint             - Run clippy linter"
 	@echo "  doc              - Build documentation"
@@ -71,6 +73,14 @@ build:
 test:
 	@echo "Running tests..."
 	@cargo test --workspace --all-features --lib --bins
+
+examples:
+	@echo "Running examples..."
+	@./run_examples.sh
+
+msrv:
+	@echo "Checking all targets on Rust 1.88..."
+	@cargo +1.88 check --all-targets --all-features
 
 fmt:
 	@echo "Formatting code..."
