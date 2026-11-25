@@ -62,7 +62,7 @@ async fn any_significant_stops_the_supervisor_when_one_ends() {
             stopped = Some(reason);
         }
     }
-    assert_eq!(stopped, Some(ChildExitReason::Shutdown));
+    assert_eq!(stopped, Some(ChildExitReason::Normal));
 }
 
 #[tokio::test]
@@ -164,8 +164,22 @@ async fn a_nested_supervisor_that_shuts_itself_down_is_not_restarted() {
         .with_worker("service", Service, RestartPolicy::Permanent)
         .with_supervisor(subtree);
     let handle = SupervisorHandle::start(spec).expect("valid spec");
+    let mut events = handle.subscribe();
 
     tokio::time::sleep(Duration::from_millis(120)).await;
+    let mut subtree_exit = None;
+    while let Ok(event) = events.try_recv() {
+        if let SupervisorEvent::ChildTerminated { id, reason } = event
+            && &*id == "batch"
+        {
+            subtree_exit = Some(reason);
+        }
+    }
+    assert_eq!(
+        subtree_exit,
+        Some(ChildExitReason::Normal),
+        "a subtree that stopped itself ended normally"
+    );
     let children = handle.which_children().await.expect("root still running");
     assert_eq!(
         children.len(),

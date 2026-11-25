@@ -250,7 +250,7 @@ impl SupervisorRuntime {
                         // Children are already shut down: either restart
                         // intensity was exceeded (abnormal, so the parent applies
                         // its own policy, as OTP does) or significant children
-                        // ended (shutdown).
+                        // ended (normal).
                         return exit;
                     }
                 }
@@ -508,23 +508,11 @@ impl SupervisorRuntime {
         id: Arc<str>,
         reason: ChildExitReason,
     ) -> RuntimeControl {
-        // A nested supervisor reporting `Shutdown` about its current instance
-        // was not stopped by this supervisor (that would make the report
-        // stale): it shut itself down through its auto_shutdown, which counts
-        // as ending normally.
-        let effective = if self.children[position].child_type() == ChildType::Supervisor
-            && reason == ChildExitReason::Shutdown
-        {
-            ChildExitReason::Normal
-        } else {
-            reason
-        };
-
         // Supervision semantics live in one shared place; this runtime only
         // carries out the decision.
         let decision = decide_restart(
             Some(self.children[position].policy()),
-            effective,
+            reason,
             self.restart_strategy,
             &mut self.restart_tracker,
             &mut self.backoff_tracker,
@@ -554,7 +542,10 @@ impl SupervisorRuntime {
                         "significant child ended, shutting down"
                     );
                     self.shutdown_children().await;
-                    return RuntimeControl::Exit(ChildExitReason::Shutdown);
+                    // Stopping itself because its work is done is a normal
+                    // end, not a stop by its own supervisor: a parent applies
+                    // its restart policy to it like to a worker that returned.
+                    return RuntimeControl::Exit(ChildExitReason::Normal);
                 }
                 RuntimeControl::Continue
             }

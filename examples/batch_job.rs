@@ -122,9 +122,8 @@ async fn nested_job() -> Result<(), Box<dyn std::error::Error>> {
         if let SupervisorEvent::ChildTerminated { id, reason } = event {
             println!("  [app] child {id} terminated ({reason:?})");
             if &*id == "import-job" {
-                // The event carries the raw reason; for deciding on a restart,
-                // a nested supervisor that shut itself down counts as a normal
-                // exit, so a Transient one is left stopped.
+                // Stopping itself is a normal end, so a Transient job is
+                // left stopped.
                 break;
             }
         }

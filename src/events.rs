@@ -49,7 +49,8 @@ pub enum SupervisorEvent {
     /// The supervisor itself stopped. No further events follow.
     Stopped {
         /// [`ChildExitReason::Shutdown`] when asked to stop,
-        /// [`ChildExitReason::Abnormal`] when it gave up.
+        /// [`ChildExitReason::Normal`] when it stopped itself through its
+        /// `AutoShutdown`, [`ChildExitReason::Abnormal`] when it gave up.
         reason: ChildExitReason,
     },
 }

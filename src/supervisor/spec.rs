@@ -59,6 +59,11 @@ pub enum ShutdownOrder {
 /// counts: a `Temporary` child that exits for any reason, or a `Transient`
 /// child that exits normally. Children stopped with `terminate_child` or by
 /// the supervisor do not.
+///
+/// A supervisor that stops itself this way exits with
+/// [`ChildExitReason::Normal`](crate::ChildExitReason::Normal): that is the
+/// reason in its `Stopped` event and the one its parent sees, so a parent
+/// running it as `Transient` leaves it stopped.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum AutoShutdown {
     /// Never; no child may be significant.
