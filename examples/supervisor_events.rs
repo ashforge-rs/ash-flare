@@ -59,16 +59,23 @@ impl Worker for Logger {
     }
 }
 
+/// The message a panic was raised with.
+fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = info.payload();
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Supervisor events ===\n");
 
     // Print panics on one line instead of the default multi-line report.
     std::panic::set_hook(Box::new(|info| {
-        println!(
-            "           (panic: {})",
-            info.payload_as_str().unwrap_or("?")
-        );
+        println!("           (panic: {})", panic_message(info));
     }));
 
     let spec = SupervisorSpec::new("sensors")
