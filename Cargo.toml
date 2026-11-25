@@ -192,3 +192,7 @@ path = "examples/secure_remote.rs"
 [[example]]
 name = "chat_server"
 path = "examples/chat_server.rs"
+
+[[example]]
+name = "gold_ledger"
+path = "examples/gold_ledger.rs"
