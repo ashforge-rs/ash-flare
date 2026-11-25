@@ -19,7 +19,7 @@ This is a major release; see "Migrating from 3.x" in the README.
 - Children are stopped in reverse start order by default.
 - `ChildExitReason` gains `Killed`; `ChildExitReason`, `SupervisorError` and `DistributedError` are `#[non_exhaustive]`.
 - `SupervisorError::NoChildren`, `SupervisorError::AllChildrenFailed` and `WorkerError` are removed.
-- `ChildInfo::restart_policy` is `None` for nested supervisors.
+- `ChildInfo::restart_policy` reports a nested supervisor's own policy instead of `None`.
 - `Mailbox::recv` and `try_recv` take `&self`.
 - `distributed::ChildInfo` is replaced by the crate-level `ChildInfo`; `SupervisorStatus::restart_strategy` is a `RestartStrategy`.
 - `RemoteSupervisorHandle::connect_tcp` / `connect_unix` are replaced by the `tcp` / `unix` constructors.
@@ -63,7 +63,7 @@ This is a major release; see "Migrating from 3.x" in the README.
 - `add_worker` accepts `shutdown=` and `significant=`; specs gain `with_shutdown_order`, `with_auto_shutdown` and `with_restart_policy`.
 - Handles gain `kill_child`, `subscribe` (lossless) and `start_unique_child`; `link` links two children.
 - `RemoteSupervisorHandle` accepts `cookie=` and gains `status`.
-- Handles gain `wait` and `child_supervisor`; specs gain `with_give_up`.
+- Handles gain `wait` and `child_supervisor`; specs gain `with_give_up` and `with_registered_name`, and `SupervisorHandle.whereis` finds a registered supervisor.
 - `SupervisorHandle.start` raises `ValueError` for an invalid spec; `shutdown` blocks until the tree has stopped.
 
 ### Dependencies

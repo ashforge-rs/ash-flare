@@ -50,10 +50,12 @@ pub struct ChildInfo {
     pub id: ChildId,
     /// Type of child (Worker or Supervisor)
     pub child_type: ChildType,
-    /// Restart policy for the child; `None` for nested supervisors, whose
-    /// policy is set with
+    /// Restart policy for the child. A nested supervisor reports the one set
+    /// with
     /// [`SupervisorSpec::with_restart_policy`](crate::SupervisorSpec::with_restart_policy)
-    /// (`Permanent` unless changed).
+    /// (`Permanent` unless changed). Always `Some` from a 4.x supervisor; it
+    /// stays an `Option` so code written for 3.x, where nested supervisors
+    /// reported `None`, keeps compiling.
     pub restart_policy: Option<RestartPolicy>,
 }
 

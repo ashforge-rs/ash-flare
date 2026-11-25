@@ -160,13 +160,29 @@ async fn child_supervisor_returns_a_nested_supervisor() {
     let root = SupervisorHandle::start(
         SupervisorSpec::new("root")
             .with_worker("worker", Idle, RestartPolicy::Permanent)
-            .with_supervisor(SupervisorSpec::new("rooms").with_worker(
-                "lobby",
-                Idle,
-                RestartPolicy::Permanent,
-            )),
+            .with_supervisor(
+                SupervisorSpec::new("rooms")
+                    .with_restart_policy(RestartPolicy::Transient)
+                    .with_worker("lobby", Idle, RestartPolicy::Permanent),
+            ),
     )
     .unwrap();
+
+    let policies: Vec<_> = root
+        .which_children()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|child| (child.id, child.restart_policy))
+        .collect();
+    assert_eq!(
+        policies,
+        [
+            ("worker".to_owned(), Some(RestartPolicy::Permanent)),
+            ("rooms".to_owned(), Some(RestartPolicy::Transient)),
+        ],
+        "a nested supervisor reports its own restart policy"
+    );
 
     let rooms = root.child_supervisor("rooms").await.unwrap();
     assert_eq!(rooms.name(), "rooms");

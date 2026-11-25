@@ -3,9 +3,11 @@
 //! miss a termination.
 
 use ash_flare::{
-    ChildExitReason, ChildSpec, RestartBackoff, RestartPolicy, ShutdownSignal, SupervisorEvent,
-    SupervisorHandle, SupervisorSpec, Worker, link,
+    ChildExitReason, ChildSpec, RestartBackoff, RestartPolicy, Shutdown, ShutdownSignal,
+    SupervisorEvent, SupervisorHandle, SupervisorSpec, Worker, link,
 };
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -134,39 +136,90 @@ async fn a_monitor_ends_after_the_supervisor_stops() {
     assert_eq!(after.recv().await, None);
 }
 
-/// A link keeps working through a flood of unrelated events that would make
-/// a broadcast subscriber skip some.
-#[tokio::test(flavor = "current_thread")]
-async fn a_link_fires_after_a_flood_of_events() {
-    let busy = SupervisorHandle::start(SupervisorSpec::new("busy").with_worker(
-        "pool",
-        Idle,
-        RestartPolicy::Permanent,
-    ))
+/// Stays up until stopped, then takes a while to clean up. Its supervisor
+/// answers no command while it waits for that cleanup.
+struct SlowToStop(ShutdownSignal);
+impl Worker for SlowToStop {
+    type Error = std::io::Error;
+    async fn run(&mut self) -> Result<(), Self::Error> {
+        self.0.cancelled().await;
+        Ok(())
+    }
+    async fn shutdown(&mut self) -> Result<(), Self::Error> {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        Ok(())
+    }
+}
+
+/// Counts its starts and stays up until stopped.
+struct Counted(Arc<AtomicUsize>, ShutdownSignal);
+impl Worker for Counted {
+    type Error = std::io::Error;
+    async fn run(&mut self) -> Result<(), Self::Error> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        self.1.cancelled().await;
+        Ok(())
+    }
+}
+
+/// A link that is busy killing a partner does not miss the next termination,
+/// even when far more events than a broadcast holds arrive meanwhile. With
+/// links on the lossy broadcast, the second termination below was dropped
+/// and the cache was killed only once.
+#[tokio::test]
+async fn a_link_misses_no_termination_while_it_waits() {
+    let busy = SupervisorHandle::start(
+        SupervisorSpec::new("busy")
+            .with_restart_backoff(RestartBackoff::none())
+            .with_worker("pool", Idle, RestartPolicy::Permanent),
+    )
     .unwrap();
+    let cache_starts = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&cache_starts);
     let other = SupervisorHandle::start(
         SupervisorSpec::new("other")
             .with_restart_backoff(RestartBackoff::none())
-            .with_worker("cache", Idle, RestartPolicy::Permanent),
+            .with_child(ChildSpec::new("slow", SlowToStop).shutdown(Shutdown::Infinity))
+            .with_worker(
+                "cache",
+                move |signal| Counted(Arc::clone(&counted), signal),
+                RestartPolicy::Permanent,
+            ),
     )
     .unwrap();
     let _link = link(&busy, "pool", &other, "cache");
-    let mut cache = other.monitor_child("cache");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(cache_starts.load(Ordering::SeqCst), 1);
 
+    // `other` spends two seconds stopping `slow`, answering no command.
+    let stopping = {
+        let other = other.clone();
+        tokio::spawn(async move { other.terminate_child("slow").await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // The pool dies: the link asks `other` to kill the cache, and waits.
+    assert!(busy.kill_child("pool").await.unwrap());
+    // The pool dies again while the link is still waiting...
+    while !busy.kill_child("pool").await.unwrap() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // ...and far more events than a broadcast holds follow.
     burst(&busy).await;
-    busy.kill_child("pool").await.unwrap();
+    stopping.await.unwrap().unwrap();
 
-    let killed = tokio::time::timeout(Duration::from_secs(5), async {
-        while let Some(event) = cache.recv().await {
-            if let SupervisorEvent::ChildTerminated { reason, .. } = event {
-                return reason;
-            }
+    // Both terminations reached the cache: killed twice, so started 3 times.
+    let started = tokio::time::timeout(Duration::from_secs(5), async {
+        while cache_starts.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("the cache's supervisor stopped");
     })
-    .await
-    .expect("the link killed the cache");
-    assert_eq!(killed, ChildExitReason::Killed);
+    .await;
+    assert!(
+        started.is_ok(),
+        "the cache was started {} times; the link missed a termination",
+        cache_starts.load(Ordering::SeqCst)
+    );
 
     busy.shutdown().await.unwrap();
     other.shutdown().await.unwrap();

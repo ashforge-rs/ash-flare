@@ -462,7 +462,7 @@ impl SupervisorRuntime {
             .map(|child| ChildInfo {
                 id: child.id().to_owned(),
                 child_type: child.child_type(),
-                restart_policy: child.restart_policy(),
+                restart_policy: Some(child.policy()),
             })
             .collect()
     }
@@ -687,8 +687,8 @@ impl SupervisorRuntime {
                 let spec = worker.spec.clone();
                 *child = Child::Worker(WorkerProcess::spawn(spec, spawn));
             }
-            Child::Supervisor { spec, .. } => {
-                let spec = Arc::clone(spec);
+            Child::Supervisor { spec: current, .. } => {
+                let spec = Arc::clone(current);
                 let handle =
                     SupervisorHandle::start_supervised((*spec).clone(), spawn.control_tx.clone());
                 *child = Child::Supervisor { handle, spec };

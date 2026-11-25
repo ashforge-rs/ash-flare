@@ -297,8 +297,8 @@ fn positional_arity(py: Python<'_>, callable: &Py<PyAny>) -> Option<Arity> {
     let mut required = 0_usize;
     let mut limit = Some(0_usize);
 
-    for param in params.try_iter().ok()? {
-        let param = param.ok()?;
+    for item in params.try_iter().ok()? {
+        let param = item.ok()?;
         let kind = param.getattr("kind").ok()?;
 
         if kind.eq(&var_positional).ok()? {

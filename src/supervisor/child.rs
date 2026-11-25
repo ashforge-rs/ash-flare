@@ -53,16 +53,6 @@ impl Child {
         }
     }
 
-    /// The child's restart policy as reported in `ChildInfo`: `None` for
-    /// nested supervisors. Restart decisions use [`policy`](Self::policy).
-    #[inline]
-    pub fn restart_policy(&self) -> Option<RestartPolicy> {
-        match self {
-            Child::Worker(w) => Some(w.spec.restart_policy),
-            Child::Supervisor { .. } => None,
-        }
-    }
-
     /// The policy restart decisions use. Nested supervisors carry their own,
     /// set with `SupervisorSpec::with_restart_policy`.
     #[inline]

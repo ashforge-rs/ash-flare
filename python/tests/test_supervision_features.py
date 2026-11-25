@@ -14,6 +14,7 @@ import time
 from ash_flare import (
     AutoShutdown,
     RemoteSupervisorHandle,
+    RestartIntensity,
     RestartPolicy,
     Shutdown,
     ShutdownOrder,
@@ -176,6 +177,41 @@ def test_child_supervisor_returns_a_nested_supervisor():
     rooms.start_child("room-1", RestartPolicy.permanent(), idle)
     assert len(rooms.which_children()) == 2
     handle.shutdown()
+
+
+def test_a_registered_name_follows_the_supervisor_across_restarts():
+    starts = []
+
+    def fails_first_time(should_stop):
+        starts.append(1)
+        if len(starts) == 1:
+            raise RuntimeError("first start fails")
+        idle(should_stop)
+
+    nested = SupervisorSpec("py-jobs")
+    nested.with_registered_name("py-jobs")
+    nested.with_restart_intensity(RestartIntensity(0, 5))
+    nested.add_worker("flaky", RestartPolicy.permanent(), fails_first_time)
+    root = SupervisorSpec("root")
+    root.with_restart_delay(0.0)
+    root.add_supervisor(nested)
+    handle = SupervisorHandle.start(root)
+
+    first = SupervisorHandle.whereis("py-jobs")
+    assert first is not None
+    assert first.wait(timeout=5).is_abnormal(), "the first run gave up"
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        current = SupervisorHandle.whereis("py-jobs")
+        if current is not None and current.wait(timeout=0) is None:
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("the restarted run never registered")
+    assert len(current.which_children()) == 1
+
+    handle.shutdown()
+    assert SupervisorHandle.whereis("py-jobs") is None
 
 
 GIVE_UP_CHILD = """

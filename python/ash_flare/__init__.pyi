@@ -142,7 +142,12 @@ class GiveUp:
         """Stop; ``SupervisorHandle.wait()`` reports it (the default)."""
     @staticmethod
     def exit_process(code: int) -> GiveUp:
-        """Exit the process with ``code`` once the tree has shut down."""
+        """Exit the process with ``code`` once the tree has shut down.
+
+        The interpreter does not clean up (no ``finally`` blocks or ``atexit``
+        handlers run). To clean up first, keep the default and call
+        ``sys.exit`` after ``SupervisorHandle.wait()`` returns.
+        """
 
 class SupervisorEvent:
     """Something that happened in a supervisor.
@@ -246,6 +251,9 @@ class SupervisorSpec:
     def with_give_up(self, give_up: GiveUp) -> None:
         """What a top-level supervisor does when it gives up."""
 
+    def with_registered_name(self, name: str) -> None:
+        """Register each run under ``name``; see ``SupervisorHandle.whereis``."""
+
     def add_worker(
         self,
         id: str,
@@ -262,6 +270,14 @@ class SupervisorSpec:
 
 class SupervisorHandle:
     """Controls a running supervision tree."""
+
+    @staticmethod
+    def whereis(name: str) -> Optional[SupervisorHandle]:
+        """The current run of the supervisor registered under ``name``.
+
+        Unlike a handle, which refers to one run and stops working when that
+        run stops, a name always leads to the run that is up.
+        """
 
     @staticmethod
     def start(spec: SupervisorSpec) -> SupervisorHandle:
@@ -306,7 +322,11 @@ class SupervisorHandle:
         if ``timeout`` seconds pass first."""
 
     def child_supervisor(self, child_id: str) -> SupervisorHandle:
-        """The handle of a nested supervisor, for its current run."""
+        """The handle of a nested supervisor, for its current run.
+
+        If the nested supervisor restarts, ask again, or give it a registered
+        name and use ``SupervisorHandle.whereis``.
+        """
 
     def subscribe(self) -> EventStream: ...
     def terminate_child(self, child_id: str) -> None: ...
@@ -328,6 +348,8 @@ class StatefulSupervisorSpec:
     def with_shutdown_order(self, order: ShutdownOrder) -> None: ...
     def with_auto_shutdown(self, auto_shutdown: AutoShutdown) -> None: ...
     def with_restart_policy(self, policy: RestartPolicy) -> None: ...
+    def with_registered_name(self, name: str) -> None:
+        """Register each run under ``name``; see ``SupervisorHandle.whereis``."""
     def context(self) -> WorkerContext:
         """The shared context handed to every worker."""
 

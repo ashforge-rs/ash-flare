@@ -126,6 +126,12 @@ impl PyStatefulSupervisorSpec {
         self.inner.restart_policy = policy.inner;
     }
 
+    /// Registers each run of this supervisor under `name`, so
+    /// `SupervisorHandle.whereis(name)` finds its current run.
+    fn with_registered_name(&mut self, name: String) {
+        self.inner.registration = Some((crate::registry::Registry::global().clone(), name));
+    }
+
     fn add_supervisor(&mut self, supervisor: &PyStatefulSupervisorSpec) {
         self.inner = std::mem::replace(&mut self.inner, SupervisorSpec::new("temp"))
             .with_supervisor(supervisor.inner.clone());

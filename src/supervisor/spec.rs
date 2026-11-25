@@ -93,7 +93,25 @@ pub enum GiveUp {
     /// Once the tree has shut down, exit the process with this status code,
     /// so the process supervisor (systemd, Kubernetes, a container runtime)
     /// restarts it, as an OTP node shuts down when a permanent application
-    /// fails. Destructors of other tasks and threads do not run.
+    /// fails.
+    ///
+    /// The tree's own `shutdown` hooks have run by then, but the process
+    /// exits from inside the supervisor, so destructors of other tasks and
+    /// threads, and code after `main`'s `await`, do not run. When more has to
+    /// happen first, use [`GiveUp::Stop`] and exit from `main` instead:
+    ///
+    /// ```no_run
+    /// # use ash_flare::{ChildExitReason, SupervisorHandle, SupervisorSpec};
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// # let spec = SupervisorSpec::new("app");
+    /// let app = SupervisorHandle::start(spec).unwrap();
+    /// if app.wait().await == ChildExitReason::Abnormal {
+    ///     // Flush logs and metrics, release locks, then exit for a restart.
+    ///     std::process::exit(1);
+    /// }
+    /// # }
+    /// ```
     ExitProcess(i32),
 }
 

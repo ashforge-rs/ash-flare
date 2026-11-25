@@ -117,6 +117,12 @@ impl PySupervisorSpec {
         self.inner.give_up = give_up.inner;
     }
 
+    /// Registers each run of this supervisor under `name`, so
+    /// `SupervisorHandle.whereis(name)` finds its current run.
+    fn with_registered_name(&mut self, name: String) {
+        self.inner.registration = Some((crate::registry::Registry::global().clone(), name));
+    }
+
     /// How this supervisor is restarted when nested in another.
     fn with_restart_policy(&mut self, policy: PyRestartPolicy) {
         self.inner.restart_policy = policy.inner;
@@ -136,6 +142,15 @@ pub struct PySupervisorHandle {
 
 #[pymethods]
 impl PySupervisorHandle {
+    /// The current run of the supervisor registered under `name` with
+    /// `with_registered_name`, or `None`.
+    #[staticmethod]
+    fn whereis(name: &str) -> Option<Self> {
+        crate::registry::Registry::global()
+            .whereis::<SupervisorHandle>(name)
+            .map(|inner| Self { inner })
+    }
+
     #[staticmethod]
     fn start(spec: &PySupervisorSpec) -> PyResult<Self> {
         let runtime = get_runtime();
