@@ -1,6 +1,8 @@
 //! Shared resource access example - multiple workers sharing a resource pool
 
-use ash_flare::{RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker};
+use ash_flare::{
+    RestartIntensity, RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -141,6 +143,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let spec = SupervisorSpec::new("resource-supervisor")
         .with_restart_strategy(RestartStrategy::OneForOne)
+        // The workers here fail on purpose, more often than the default of 3
+        // restarts in 5 seconds allows; past that the supervisor would give up.
+        .with_restart_intensity(RestartIntensity::new(10, 5))
         .with_worker(
             "worker-1",
             move || ResourceWorker::new(1, Arc::clone(&resource_1)),

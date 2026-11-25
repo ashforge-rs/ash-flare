@@ -252,10 +252,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             move || NotificationPublisher::new(tx.clone()),
             RestartPolicy::Transient,
         )
+        // Transient: once the publisher is done and the channel closes, the
+        // fanout finishes normally and is not restarted. As Permanent it would
+        // be restarted onto the closed channel until the supervisor gave up.
         .with_worker(
             "fanout",
             move || FanoutWorker::new(Arc::clone(&rx)),
-            RestartPolicy::Permanent,
+            RestartPolicy::Transient,
         );
 
     let supervisor = SupervisorHandle::start(spec).expect("valid supervisor spec");
