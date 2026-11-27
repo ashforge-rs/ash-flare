@@ -51,8 +51,10 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace --all-features --verbose --lib --bins
       
+      # Unit and integration tests (tests/*.rs). Benchmarks are left out:
+      # they are heavy, and `make bench` runs them on demand.
       - name: Run tests
-        run: cargo test --workspace --all-features --verbose --lib --bins
+        run: cargo test --workspace --all-features --verbose --lib --bins --tests
       
       - name: Run doc tests
         run: cargo test --workspace --doc --all-features
