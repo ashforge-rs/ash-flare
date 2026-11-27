@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-11-27
+
 This is a major release; see "Migrating from 3.x" in the README.
 
 ### Breaking
