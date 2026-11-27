@@ -1,7 +1,6 @@
 //! Notification fanout system - topic-based and campaign-based delivery
 
 use ash_flare::{RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,8 +54,6 @@ impl NotificationPublisher {
         Ok(())
     }
 }
-
-#[async_trait]
 impl Worker for NotificationPublisher {
     type Error = NotificationError;
 
@@ -196,8 +193,6 @@ impl FanoutWorker {
         Ok(())
     }
 }
-
-#[async_trait]
 impl Worker for FanoutWorker {
     type Error = NotificationError;
 
@@ -243,37 +238,6 @@ impl Worker for FanoutWorker {
     }
 }
 
-enum NotificationWorker {
-    Publisher(NotificationPublisher),
-    Fanout(FanoutWorker),
-}
-
-#[async_trait]
-impl Worker for NotificationWorker {
-    type Error = NotificationError;
-
-    async fn initialize(&mut self) -> Result<(), Self::Error> {
-        match self {
-            NotificationWorker::Publisher(w) => w.initialize().await,
-            NotificationWorker::Fanout(w) => w.initialize().await,
-        }
-    }
-
-    async fn run(&mut self) -> Result<(), Self::Error> {
-        match self {
-            NotificationWorker::Publisher(w) => w.run().await,
-            NotificationWorker::Fanout(w) => w.run().await,
-        }
-    }
-
-    async fn shutdown(&mut self) -> Result<(), Self::Error> {
-        match self {
-            NotificationWorker::Publisher(w) => w.shutdown().await,
-            NotificationWorker::Fanout(w) => w.shutdown().await,
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Notification Fanout System ===\n");
@@ -285,16 +249,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_restart_strategy(RestartStrategy::OneForOne)
         .with_worker(
             "publisher",
-            move || NotificationWorker::Publisher(NotificationPublisher::new(tx.clone())),
+            move || NotificationPublisher::new(tx.clone()),
             RestartPolicy::Transient,
         )
+        // Transient: once the publisher is done and the channel closes, the
+        // fanout finishes normally and is not restarted. As Permanent it would
+        // be restarted onto the closed channel until the supervisor gave up.
         .with_worker(
             "fanout",
-            move || NotificationWorker::Fanout(FanoutWorker::new(Arc::clone(&rx))),
-            RestartPolicy::Permanent,
+            move || FanoutWorker::new(Arc::clone(&rx)),
+            RestartPolicy::Transient,
         );
 
-    let supervisor = SupervisorHandle::start(spec);
+    let supervisor = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     println!("Started notification system\n");
 

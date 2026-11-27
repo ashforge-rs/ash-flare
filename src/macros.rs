@@ -21,7 +21,6 @@
 #[macro_export]
 macro_rules! impl_worker {
     ($worker:ty, $error:ty => $run_body:block) => {
-        #[async_trait::async_trait]
         impl $crate::Worker for $worker {
             type Error = $error;
 
@@ -30,7 +29,7 @@ macro_rules! impl_worker {
     };
 }
 
-/// Implement the Worker trait with access to self for stateful workers
+/// Implement the Worker trait with access to `self` in the run body
 ///
 /// # Examples
 ///
@@ -53,7 +52,6 @@ macro_rules! impl_worker {
 #[macro_export]
 macro_rules! impl_worker_stateful {
     ($worker:ty, $error:ty => |$self:ident| $run_body:block) => {
-        #[async_trait::async_trait]
         impl $crate::Worker for $worker {
             type Error = $error;
 
@@ -87,7 +85,6 @@ macro_rules! impl_worker_stateful {
 #[macro_export]
 macro_rules! impl_worker_mailbox {
     ($worker:ty, $error:ty => |$self:ident, $msg:ident| $process_body:block) => {
-        #[async_trait::async_trait]
         impl $crate::Worker for $worker {
             type Error = $error;
 
@@ -99,95 +96,15 @@ macro_rules! impl_worker_mailbox {
     };
 }
 
-/// Build a stateful supervision tree with shared in-memory key-value store
-///
-/// # Examples
-///
-/// ```
-/// use ash_flare::{stateful_supervision_tree, Worker, WorkerContext};
-/// use async_trait::async_trait;
-/// use std::sync::Arc;
-///
-/// struct MyWorker {
-///     ctx: Arc<WorkerContext>,
-/// }
-///
-/// #[async_trait]
-/// impl Worker for MyWorker {
-///     type Error = std::io::Error;
-///     async fn run(&mut self) -> Result<(), Self::Error> {
-///         self.ctx.set("key", serde_json::json!("value"));
-///         Ok(())
-///     }
-/// }
-///
-/// let spec = stateful_supervision_tree! {
-///     name: "app",
-///     strategy: OneForOne,
-///     intensity: (5, 10),
-///     workers: [
-///         ("worker-1", |ctx| MyWorker { ctx }, Permanent),
-///         ("worker-2", |ctx| MyWorker { ctx }, Transient),
-///     ],
-///     supervisors: []
-/// };
-/// ```
-#[macro_export]
-macro_rules! stateful_supervision_tree {
-    (
-        name: $name:expr,
-        strategy: $strategy:ident,
-        intensity: ($max:expr, $secs:expr),
-        workers: [ $(($id:expr, $factory:expr, $policy:ident)),* $(,)? ],
-        supervisors: [ $($sup:expr),* $(,)? ]
-    ) => {
-        {
-            let spec = $crate::StatefulSupervisorSpec::new($name)
-                .with_restart_strategy($crate::RestartStrategy::$strategy)
-                .with_restart_intensity($crate::RestartIntensity {
-                    max_restarts: $max,
-                    within_seconds: $secs,
-                })
-                $(
-                    .with_worker($id, $factory, $crate::RestartPolicy::$policy)
-                )*
-                $(
-                    .with_supervisor($sup)
-                )*;
-            spec
-        }
-    };
-    (
-        name: $name:expr,
-        strategy: $strategy:ident,
-        workers: [ $(($id:expr, $factory:expr, $policy:ident)),* $(,)? ],
-        supervisors: [ $($sup:expr),* $(,)? ]
-    ) => {
-        {
-            let spec = $crate::StatefulSupervisorSpec::new($name)
-                .with_restart_strategy($crate::RestartStrategy::$strategy)
-                $(
-                    .with_worker($id, $factory, $crate::RestartPolicy::$policy)
-                )*
-                $(
-                    .with_supervisor($sup)
-                )*;
-            spec
-        }
-    };
-}
-
 /// Build a supervision tree with a declarative syntax
 ///
 /// # Examples
 ///
 /// ```
 /// use ash_flare::{supervision_tree, Worker};
-/// use async_trait::async_trait;
 ///
 /// struct MyWorker;
 ///
-/// #[async_trait]
 /// impl Worker for MyWorker {
 ///     type Error = std::io::Error;
 ///     async fn run(&mut self) -> Result<(), Self::Error> { Ok(()) }
@@ -253,19 +170,29 @@ macro_rules! supervision_tree {
     };
 }
 
-/// Start a distributed supervisor server with TCP or Unix socket
+/// Start a distributed supervisor server with TCP or Unix socket.
+///
+/// Evaluates to the `JoinHandle` of the listening task. The server has no
+/// cookie; to require one, build a
+/// [`SupervisorServer`](crate::distributed::SupervisorServer) with
+/// `with_cookie` instead.
 ///
 /// # Examples
 ///
-/// ```ignore
-/// // Ignored due to requiring actual network binding
-/// use ash_flare::serve_supervisor;
+/// ```no_run
+/// use ash_flare::{serve_supervisor, SupervisorHandle, SupervisorSpec};
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let handle = SupervisorHandle::start(SupervisorSpec::new("app"))?;
 ///
 /// // TCP server
-/// serve_supervisor!(tcp, handle, "127.0.0.1:8080");
+/// let _tcp = serve_supervisor!(tcp, handle.clone(), "127.0.0.1:8080");
 ///
 /// // Unix socket server (Unix only)
-/// serve_supervisor!(unix, handle, "/tmp/supervisor.sock");
+/// let _unix = serve_supervisor!(unix, handle, "/tmp/supervisor.sock");
+/// # Ok(())
+/// # }
 /// ```
 #[macro_export]
 macro_rules! serve_supervisor {
@@ -279,39 +206,56 @@ macro_rules! serve_supervisor {
     }};
 }
 
-/// Connect to a remote supervisor via TCP or Unix socket
+/// A handle to a remote supervisor via TCP or Unix socket.
+///
+/// Evaluates to a
+/// [`RemoteSupervisorHandle`](crate::distributed::RemoteSupervisorHandle). No
+/// connection is made until its first command; add a cookie with
+/// `.with_cookie(...)`.
 ///
 /// # Examples
 ///
-/// ```ignore
-/// // Ignored due to requiring actual network connection
+/// ```
 /// use ash_flare::connect_supervisor;
 ///
-/// // Connect via TCP
-/// let remote = connect_supervisor!(tcp, "127.0.0.1:8080").await?;
+/// // Via TCP
+/// let remote = connect_supervisor!(tcp, "127.0.0.1:8080");
 ///
-/// // Connect via Unix socket (Unix only)
-/// let remote = connect_supervisor!(unix, "/tmp/supervisor.sock").await?;
+/// // Via a Unix socket (Unix only), authenticating with a cookie
+/// let remote = connect_supervisor!(unix, "/tmp/supervisor.sock").with_cookie("secret");
 /// ```
 #[macro_export]
 macro_rules! connect_supervisor {
     (tcp, $addr:expr) => {
-        $crate::distributed::RemoteSupervisorHandle::connect_tcp($addr)
+        $crate::distributed::RemoteSupervisorHandle::tcp($addr)
     };
     (unix, $path:expr) => {
-        $crate::distributed::RemoteSupervisorHandle::connect_unix($path)
+        $crate::distributed::RemoteSupervisorHandle::unix($path)
     };
 }
 
-/// Create and start a distributed supervision system with server and client
+/// Create and start a distributed supervision system with server and client.
+///
+/// Evaluates to `Result<(SupervisorHandle, JoinHandle<..>), SupervisorError>`,
+/// failing if the described tree is invalid.
+///
+/// The server has no cookie; to require one, build the tree and a
+/// [`SupervisorServer`](crate::distributed::SupervisorServer) with
+/// `with_cookie` instead.
 ///
 /// # Examples
 ///
-/// ```ignore
-/// // Ignored due to requiring actual network binding
+/// ```no_run
 /// use ash_flare::distributed_system;
-///
-/// distributed_system! {
+/// # struct MyWorker;
+/// # impl MyWorker { fn new() -> Self { MyWorker } }
+/// # impl ash_flare::Worker for MyWorker {
+/// #     type Error = std::io::Error;
+/// #     async fn run(&mut self) -> Result<(), Self::Error> { Ok(()) }
+/// # }
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let (handle, _server) = distributed_system! {
 ///     server: tcp @ "127.0.0.1:8080" => {
 ///         name: "remote-app",
 ///         strategy: OneForOne,
@@ -320,7 +264,10 @@ macro_rules! connect_supervisor {
 ///         ],
 ///         supervisors: []
 ///     }
-/// }
+/// }?;
+/// # handle.shutdown().await?;
+/// # Ok(())
+/// # }
 /// ```
 #[macro_export]
 macro_rules! distributed_system {
@@ -333,18 +280,19 @@ macro_rules! distributed_system {
         }
     ) => {
         {
-            let spec = supervision_tree! {
+            let spec = $crate::supervision_tree! {
                 name: $name,
                 strategy: $strategy,
                 workers: [ $(($id, $factory, $policy)),* ],
                 supervisors: [ $($sup),* ]
             };
-            let handle = $crate::SupervisorHandle::start(spec);
+            $crate::SupervisorHandle::start(spec).map(|handle| {
             let server = $crate::distributed::SupervisorServer::new(handle.clone());
             let server_task = tokio::spawn(async move {
                 server.listen_tcp($addr).await
             });
             (handle, server_task)
+            })
         }
     };
     (
@@ -356,18 +304,19 @@ macro_rules! distributed_system {
         }
     ) => {
         {
-            let spec = supervision_tree! {
+            let spec = $crate::supervision_tree! {
                 name: $name,
                 strategy: $strategy,
                 workers: [ $(($id, $factory, $policy)),* ],
                 supervisors: [ $($sup),* ]
             };
-            let handle = $crate::SupervisorHandle::start(spec);
+            $crate::SupervisorHandle::start(spec).map(|handle| {
             let server = $crate::distributed::SupervisorServer::new(handle.clone());
             let server_task = tokio::spawn(async move {
                 server.listen_unix($path).await
             });
             (handle, server_task)
+            })
         }
     };
 }

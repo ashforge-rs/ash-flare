@@ -106,7 +106,7 @@ impl PyMailbox {
     fn recv(&self, py: Python<'_>) -> Option<String> {
         let inner = Arc::clone(&self.inner);
         block_on_without_gil(py, async move {
-            let mut guard = inner.lock().await;
+            let guard = inner.lock().await;
             guard.recv().await
         })
     }
@@ -115,7 +115,7 @@ impl PyMailbox {
     fn try_recv(&self, py: Python<'_>) -> PyResult<String> {
         let inner = Arc::clone(&self.inner);
         let result = block_on_without_gil(py, async move {
-            let mut guard = inner.lock().await;
+            let guard = inner.lock().await;
             guard.try_recv()
         });
         result.map_err(|e| PyRuntimeError::new_err(format!("Failed to receive: {e}")))

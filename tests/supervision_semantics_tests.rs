@@ -3,10 +3,9 @@
 //! happens when a nested supervisor gives up.
 
 use ash_flare::{
-    ChildType, RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy,
-    StatefulSupervisorHandle, StatefulSupervisorSpec, SupervisorHandle, SupervisorSpec, Worker,
+    ChildType, RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy, SupervisorHandle,
+    SupervisorSpec, Worker,
 };
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::time::{Duration, Instant, sleep, timeout};
@@ -15,8 +14,6 @@ use tokio::time::{Duration, Instant, sleep, timeout};
 struct CrashOnce {
     starts: Arc<AtomicU32>,
 }
-
-#[async_trait]
 impl Worker for CrashOnce {
     type Error = std::io::Error;
 
@@ -32,8 +29,6 @@ impl Worker for CrashOnce {
 struct CrashAlways {
     starts: Arc<AtomicU32>,
 }
-
-#[async_trait]
 impl Worker for CrashAlways {
     type Error = std::io::Error;
 
@@ -47,8 +42,6 @@ impl Worker for CrashAlways {
 struct Idle {
     starts: Arc<AtomicU32>,
 }
-
-#[async_trait]
 impl Worker for Idle {
     type Error = std::io::Error;
 
@@ -82,33 +75,14 @@ fn idle_worker(starts: &Arc<AtomicU32>) -> impl Fn() -> Idle + Send + Sync + 'st
     }
 }
 
-/// Workers used together in one spec must share a type, so the two shapes above
-/// are wrapped in a single enum for the strategy tests.
-enum Child {
-    CrashOnce(CrashOnce),
-    Idle(Idle),
-}
-
-#[async_trait]
-impl Worker for Child {
-    type Error = std::io::Error;
-
-    async fn run(&mut self) -> Result<(), Self::Error> {
-        match self {
-            Child::CrashOnce(w) => w.run().await,
-            Child::Idle(w) => w.run().await,
-        }
-    }
-}
-
-fn crashing_child(starts: &Arc<AtomicU32>) -> impl Fn() -> Child + Send + Sync + 'static {
+fn crashing_child(starts: &Arc<AtomicU32>) -> impl Fn() -> CrashOnce + Send + Sync + 'static {
     let factory = crash_once(starts);
-    move || Child::CrashOnce(factory())
+    move || factory()
 }
 
-fn idle_child(starts: &Arc<AtomicU32>) -> impl Fn() -> Child + Send + Sync + 'static {
+fn idle_child(starts: &Arc<AtomicU32>) -> impl Fn() -> Idle + Send + Sync + 'static {
     let factory = idle_worker(starts);
-    move || Child::Idle(factory())
+    move || factory()
 }
 
 /// A `Shutdown` exit is the supervisor's own doing. Feeding it back through the
@@ -130,7 +104,7 @@ async fn one_for_all_restarts_each_child_exactly_once_per_failure() {
         )
         .with_worker("sibling", idle_child(&sibling), RestartPolicy::Permanent);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(300)).await;
 
     assert_eq!(
@@ -171,7 +145,7 @@ async fn one_for_all_keeps_a_transient_sibling_under_supervision() {
         )
         .with_worker("sibling", idle_child(&sibling), RestartPolicy::Transient);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(300)).await;
 
     let mut ids: Vec<String> = handle
@@ -210,7 +184,7 @@ async fn one_for_all_drops_a_temporary_sibling() {
         )
         .with_worker("sibling", idle_child(&sibling), RestartPolicy::Temporary);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(300)).await;
 
     let ids: Vec<String> = handle
@@ -227,6 +201,56 @@ async fn one_for_all_drops_a_temporary_sibling() {
         1,
         "a temporary child is not restarted"
     );
+
+    handle.shutdown().await.expect("shutdown");
+}
+
+/// Dropping a `Temporary` child during a restart round moves every child after
+/// it; looking those children up by id must still find them afterwards.
+#[tokio::test]
+async fn children_after_a_dropped_temporary_are_still_found_by_id() {
+    let temporary = counter();
+    let crasher = counter();
+    let later = counter();
+
+    let spec = SupervisorSpec::new("shifted-ids")
+        .with_restart_strategy(RestartStrategy::OneForAll)
+        .with_restart_backoff(RestartBackoff::none())
+        .with_worker(
+            "temporary",
+            idle_child(&temporary),
+            RestartPolicy::Temporary,
+        )
+        .with_worker(
+            "crasher",
+            crashing_child(&crasher),
+            RestartPolicy::Permanent,
+        )
+        .with_worker("later", idle_child(&later), RestartPolicy::Permanent);
+
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
+    sleep(Duration::from_millis(300)).await;
+
+    let ids: Vec<String> = handle
+        .which_children()
+        .await
+        .expect("supervisor alive")
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(ids, vec!["crasher".to_owned(), "later".to_owned()]);
+
+    // Both survivors moved down one position when "temporary" left.
+    handle.terminate_child("later").await.expect("found by id");
+    handle
+        .terminate_child("crasher")
+        .await
+        .expect("found by id");
+    assert!(
+        handle.terminate_child("temporary").await.is_err(),
+        "the dropped child is gone"
+    );
+    assert!(handle.which_children().await.expect("alive").is_empty());
 
     handle.shutdown().await.expect("shutdown");
 }
@@ -250,7 +274,7 @@ async fn rest_for_one_restarts_the_tail_exactly_once() {
         )
         .with_worker("last", idle_child(&after), RestartPolicy::Permanent);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(300)).await;
 
     assert_eq!(
@@ -287,7 +311,7 @@ async fn a_backing_off_child_does_not_stall_the_supervisor() {
         .with_restart_delay(Duration::from_secs(10))
         .with_worker("crasher", crash_once(&crasher), RestartPolicy::Permanent);
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     // Let the child fail and the supervisor enter its backoff.
     sleep(Duration::from_millis(100)).await;
@@ -339,7 +363,7 @@ async fn a_parent_restarts_a_nested_supervisor_that_escalated() {
         ))
         .with_supervisor(nested);
 
-    let handle = SupervisorHandle::start(parent);
+    let handle = SupervisorHandle::start(parent).expect("valid supervisor spec");
     sleep(Duration::from_millis(500)).await;
 
     assert!(
@@ -352,56 +376,6 @@ async fn a_parent_restarts_a_nested_supervisor_that_escalated() {
     let children = handle.which_children().await.expect("parent alive");
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].child_type, ChildType::Supervisor);
-
-    handle.shutdown().await.expect("shutdown");
-}
-
-/// The stateful runtime carries the same supervision logic and needs the same
-/// guarantee: one failure, one restart round.
-#[tokio::test]
-async fn stateful_one_for_all_restarts_each_child_exactly_once() {
-    let crasher = counter();
-    let sibling = counter();
-
-    let crasher_factory = {
-        let starts = Arc::clone(&crasher);
-        move |_ctx| {
-            Child::CrashOnce(CrashOnce {
-                starts: Arc::clone(&starts),
-            })
-        }
-    };
-    let sibling_factory = {
-        let starts = Arc::clone(&sibling);
-        move |_ctx| {
-            Child::Idle(Idle {
-                starts: Arc::clone(&starts),
-            })
-        }
-    };
-
-    let spec = StatefulSupervisorSpec::new("stateful-one-for-all")
-        .with_restart_strategy(RestartStrategy::OneForAll)
-        .with_restart_backoff(RestartBackoff::none())
-        .with_restart_intensity(RestartIntensity::new(3, 60))
-        .with_worker("crasher", crasher_factory, RestartPolicy::Permanent)
-        .with_worker("sibling", sibling_factory, RestartPolicy::Permanent);
-
-    let handle = StatefulSupervisorHandle::start(spec);
-    sleep(Duration::from_millis(300)).await;
-
-    assert_eq!(crasher.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        sibling.load(Ordering::SeqCst),
-        2,
-        "sibling restarted once, not looping on its own stop"
-    );
-
-    let children = handle
-        .which_children()
-        .await
-        .expect("stateful supervisor must still be alive");
-    assert_eq!(children.len(), 2);
 
     handle.shutdown().await.expect("shutdown");
 }

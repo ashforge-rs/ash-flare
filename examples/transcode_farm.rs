@@ -1,7 +1,6 @@
 //! Media transcoding farm example - distributed video processing
 
 use ash_flare::{RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -73,8 +72,6 @@ impl TranscodeWorker {
         Ok(())
     }
 }
-
-#[async_trait]
 impl Worker for TranscodeWorker {
     type Error = TranscodeError;
 
@@ -128,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let supervisor = SupervisorHandle::start(spec);
+    let supervisor = SupervisorHandle::start(spec).expect("valid supervisor spec");
     println!("Started farm with {} workers\n", num_workers);
 
     let jobs = vec![

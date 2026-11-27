@@ -1,75 +1,64 @@
-//! Stateful supervisor example using the stateful_supervision_tree macro
+//! Shared-state auction built with the `supervision_tree!` macro
 //!
-//! This example demonstrates workers sharing state through a WorkerContext
-//! using a declarative macro syntax.
+//! Bidders and a monitor are different worker types sharing one
+//! `WorkerContext`; each factory captures its own clone of the context.
 
-use ash_flare::{StatefulSupervisorHandle, Worker, WorkerContext, stateful_supervision_tree};
-use async_trait::async_trait;
-use std::sync::Arc;
+use ash_flare::{SupervisorHandle, Worker, WorkerContext, supervision_tree};
 use tokio::time::{Duration, sleep};
 
-// Auction worker that can be either a bidder or monitor
-enum AuctionWorker {
-    Bidder { id: u32, ctx: Arc<WorkerContext> },
-    Monitor { ctx: Arc<WorkerContext> },
+struct Bidder {
+    id: u64,
+    ctx: WorkerContext,
 }
 
-impl AuctionWorker {
-    fn bidder(id: u32, ctx: Arc<WorkerContext>) -> Self {
-        Self::Bidder { id, ctx }
-    }
-
-    fn monitor(ctx: Arc<WorkerContext>) -> Self {
-        Self::Monitor { ctx }
-    }
-}
-
-#[async_trait]
-impl Worker for AuctionWorker {
+impl Worker for Bidder {
     type Error = std::io::Error;
 
     async fn run(&mut self) -> Result<(), Self::Error> {
-        match self {
-            AuctionWorker::Bidder { id, ctx } => {
-                // Bidder logic
-                for round in 1..=3 {
-                    let current_bid = ctx.get("highest_bid").and_then(|v| v.as_u64()).unwrap_or(0);
+        let (id, ctx) = (self.id, &self.ctx);
+        for round in 1..=3 {
+            let current_bid = ctx.get("highest_bid").and_then(|v| v.as_u64()).unwrap_or(0);
 
-                    let my_bid = current_bid + (*id as u64 * 10);
-                    ctx.set("highest_bid", serde_json::json!(my_bid));
-                    ctx.set("last_bidder", serde_json::json!(id));
+            let my_bid = current_bid + id * 10;
+            ctx.set("highest_bid", serde_json::json!(my_bid));
+            ctx.set("last_bidder", serde_json::json!(id));
 
-                    ctx.update("total_bids", |v| {
-                        let count = v.and_then(|v| v.as_u64()).unwrap_or(0);
-                        Some(serde_json::json!(count + 1))
-                    });
+            ctx.update("total_bids", |v| {
+                let count = v.and_then(|v| v.as_u64()).unwrap_or(0);
+                Some(serde_json::json!(count + 1))
+            });
 
-                    println!("Bidder {} placed bid ${} in round {}", id, my_bid, round);
-                    sleep(Duration::from_millis(100)).await;
-                }
-                Ok(())
-            }
-            AuctionWorker::Monitor { ctx } => {
-                // Monitor logic
-                for _ in 0..5 {
-                    sleep(Duration::from_millis(80)).await;
+            println!("Bidder {} placed bid ${} in round {}", id, my_bid, round);
+            sleep(Duration::from_millis(100)).await;
+        }
+        Ok(())
+    }
+}
 
-                    let highest_bid = ctx.get("highest_bid").and_then(|v| v.as_u64()).unwrap_or(0);
+struct Monitor {
+    ctx: WorkerContext,
+}
 
-                    let last_bidder = ctx.get("last_bidder").and_then(|v| v.as_u64()).unwrap_or(0);
+impl Worker for Monitor {
+    type Error = std::io::Error;
 
-                    let total_bids = ctx.get("total_bids").and_then(|v| v.as_u64()).unwrap_or(0);
+    async fn run(&mut self) -> Result<(), Self::Error> {
+        let ctx = &self.ctx;
+        for _ in 0..5 {
+            sleep(Duration::from_millis(80)).await;
 
-                    if total_bids > 0 {
-                        println!(
-                            "📊 Monitor: Highest bid: ${}, Last bidder: {}, Total bids: {}",
-                            highest_bid, last_bidder, total_bids
-                        );
-                    }
-                }
-                Ok(())
+            let highest_bid = ctx.get("highest_bid").and_then(|v| v.as_u64()).unwrap_or(0);
+            let last_bidder = ctx.get("last_bidder").and_then(|v| v.as_u64()).unwrap_or(0);
+            let total_bids = ctx.get("total_bids").and_then(|v| v.as_u64()).unwrap_or(0);
+
+            if total_bids > 0 {
+                println!(
+                    "📊 Monitor: Highest bid: ${}, Last bidder: {}, Total bids: {}",
+                    highest_bid, last_bidder, total_bids
+                );
             }
         }
+        Ok(())
     }
 }
 
@@ -77,25 +66,35 @@ impl Worker for AuctionWorker {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔨 Starting stateful auction supervisor...\n");
 
+    let context = WorkerContext::new();
+    let bidder = |id| {
+        let ctx = context.clone();
+        move || Bidder {
+            id,
+            ctx: ctx.clone(),
+        }
+    };
+    let monitor = {
+        let ctx = context.clone();
+        move || Monitor { ctx: ctx.clone() }
+    };
+
     // Build supervision tree using the macro
-    let spec = stateful_supervision_tree! {
+    let spec = supervision_tree! {
         name: "auction-supervisor",
         strategy: OneForOne,
         intensity: (5, 10),
         workers: [
-            ("bidder-1", |ctx| AuctionWorker::bidder(1, ctx), Temporary),
-            ("bidder-2", |ctx| AuctionWorker::bidder(2, ctx), Temporary),
-            ("bidder-3", |ctx| AuctionWorker::bidder(3, ctx), Temporary),
-            ("monitor", |ctx| AuctionWorker::monitor(ctx), Temporary),
+            ("bidder-1", bidder(1), Temporary),
+            ("bidder-2", bidder(2), Temporary),
+            ("bidder-3", bidder(3), Temporary),
+            ("monitor", monitor, Temporary),
         ],
         supervisors: []
     };
 
-    // Get reference to shared context before starting
-    let context: Arc<WorkerContext> = Arc::clone(spec.context());
-
     // Start the supervisor
-    let handle = StatefulSupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     println!("👥 Workers: 3 bidders + 1 monitor");
     println!("📦 Shared store: WorkerContext with DashMap\n");

@@ -14,11 +14,15 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 /// Worker A - Sends tasks to Worker B and receives replies
-async fn worker_a(mut mailbox: Mailbox, worker_b_handle: MailboxHandle) {
+async fn worker_a(mailbox: Mailbox, worker_b_handle: MailboxHandle) {
     println!("[Worker A] Started");
 
     while let Some(msg) = mailbox.recv().await {
         println!("[Worker A] Received: {}", msg);
+
+        if msg == "stop" {
+            break;
+        }
 
         // Check for replies from Worker B (prefixed with "result:")
         if msg.starts_with("result:") {
@@ -35,11 +39,13 @@ async fn worker_a(mut mailbox: Mailbox, worker_b_handle: MailboxHandle) {
         }
     }
 
-    println!("[Worker A] Mailbox closed, shutting down");
+    // Returning drops A's handle to B, so B's mailbox closes once main's
+    // handles are gone too.
+    println!("[Worker A] Stopping");
 }
 
 /// Worker B - Processes tasks from Worker A and sends results back
-async fn worker_b(mut mailbox: Mailbox, worker_a_handle: MailboxHandle) {
+async fn worker_b(mailbox: Mailbox, worker_a_handle: MailboxHandle) {
     println!("[Worker B] Started");
 
     while let Some(msg) = mailbox.recv().await {
@@ -96,8 +102,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Let workers finish processing
     sleep(Duration::from_secs(1)).await;
 
-    // Close mailboxes to signal shutdown
+    // Each worker holds the other's handle, so dropping ours does not close
+    // their mailboxes: tell A to stop, which releases B.
     println!("\n=== Shutting Down ===");
+    worker_a_handle.send("stop").await?;
     drop(handle_a);
     drop(handle_b);
     drop(worker_a_handle);

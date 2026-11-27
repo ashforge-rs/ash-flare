@@ -2,7 +2,6 @@
 //! Demonstrates infinite depth supervision hierarchies
 
 use ash_flare::{RestartPolicy, RestartStrategy, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -32,8 +31,6 @@ impl SimpleWorker {
         }
     }
 }
-
-#[async_trait]
 impl Worker for SimpleWorker {
     type Error = WorkerError;
 
@@ -119,7 +116,7 @@ async fn main() {
     println!("  └─ root-worker");
     println!();
 
-    let handle = ash_flare::SupervisorHandle::start(root);
+    let handle = ash_flare::SupervisorHandle::start(root).expect("valid supervisor spec");
 
     // Let it run and watch restarts
     sleep(Duration::from_secs(15)).await;

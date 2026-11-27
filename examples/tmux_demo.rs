@@ -7,7 +7,6 @@
 use ash_flare::{
     ChildType, RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker,
 };
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -106,8 +105,6 @@ impl DemoWorker {
         }
     }
 }
-
-#[async_trait]
 impl Worker for DemoWorker {
     type Error = WorkerError;
 
@@ -241,7 +238,7 @@ impl WorkerStats {
 // ============================================================================
 
 async fn render_tree_pane(
-    root: &SupervisorHandle<DemoWorker>,
+    root: &SupervisorHandle,
     stats: &Arc<RwLock<WorkerStats>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Clear screen
@@ -458,10 +455,7 @@ async fn render_log_pane(event_log: &EventLog) {
 // Demo Tree Setup
 // ============================================================================
 
-fn create_demo_tree(
-    stats: Arc<RwLock<WorkerStats>>,
-    event_log: EventLog,
-) -> SupervisorSpec<DemoWorker> {
+fn create_demo_tree(stats: Arc<RwLock<WorkerStats>>, event_log: EventLog) -> SupervisorSpec {
     // Database layer
     let db_cluster = SupervisorSpec::new("database")
         .with_restart_strategy(RestartStrategy::OneForOne)
@@ -612,7 +606,7 @@ async fn main() {
 
     // Start supervisor tree
     let tree_spec = create_demo_tree(stats.clone(), event_log.clone());
-    let root = SupervisorHandle::start(tree_spec);
+    let root = SupervisorHandle::start(tree_spec).expect("valid supervisor spec");
 
     sleep(Duration::from_millis(1000)).await;
 

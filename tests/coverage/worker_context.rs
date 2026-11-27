@@ -53,7 +53,7 @@ async fn test_worker_context_len_empty() {
     ctx.set("b", serde_json::json!(2));
     assert_eq!(ctx.len(), 2);
 
-    ctx.delete("a");
+    let _removed = ctx.delete("a");
     assert_eq!(ctx.len(), 1);
 }
 

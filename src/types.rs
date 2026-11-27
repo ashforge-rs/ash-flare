@@ -21,26 +21,41 @@ use std::sync::Arc;
     RkyvDeserialize,
 )]
 #[rkyv(derive(Debug))]
+#[non_exhaustive]
 pub enum ChildExitReason {
     /// Normal termination
     Normal,
     /// Abnormal termination (error or panic)
     Abnormal,
-    /// Shutdown requested
+    /// Stopped by its supervisor, cooperatively
     Shutdown,
+    /// Stopped by its supervisor by aborting its task, because its shutdown
+    /// setting is `BrutalKill` or it overran its shutdown timeout. Its
+    /// `shutdown` hook did not run.
+    Killed,
 }
 
 /// Child identifier type
 pub type ChildId = String;
 
-/// Information about a child process
-#[derive(Debug, Clone)]
+/// Information about a supervised child, as returned by
+/// [`SupervisorHandle::which_children`](crate::SupervisorHandle::which_children)
+/// and sent over the wire by the [distributed](crate::distributed) protocol.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+#[rkyv(derive(Debug))]
 pub struct ChildInfo {
     /// Unique identifier for the child
     pub id: ChildId,
     /// Type of child (Worker or Supervisor)
     pub child_type: ChildType,
-    /// Restart policy for the child (None for supervisors)
+    /// Restart policy for the child. A nested supervisor reports the one set
+    /// with
+    /// [`SupervisorSpec::with_restart_policy`](crate::SupervisorSpec::with_restart_policy)
+    /// (`Permanent` unless changed). Always `Some` from a 4.x supervisor; it
+    /// stays an `Option` so code written for 3.x, where nested supervisors
+    /// reported `None`, keeps compiling.
     pub restart_policy: Option<RestartPolicy>,
 }
 
@@ -68,7 +83,8 @@ pub enum ChildType {
 /// Cooperative shutdown signal handed to a worker.
 ///
 /// A supervisor asks a worker to stop before resorting to aborting its task.
-/// Select on [`ShutdownSignal::cancelled`] inside [`run`](crate::Worker::run) so
+/// Take the signal in the worker's factory (`|signal| MyWorker { signal }`) and
+/// select on [`ShutdownSignal::cancelled`] inside [`run`](crate::Worker::run) so
 /// the worker can return promptly and let
 /// [`shutdown`](crate::Worker::shutdown) perform its cleanup.
 ///
@@ -78,14 +94,12 @@ pub enum ChildType {
 /// # Examples
 ///
 /// ```
-/// use ash_flare::{ShutdownSignal, Worker};
-/// use async_trait::async_trait;
+/// use ash_flare::{RestartPolicy, ShutdownSignal, SupervisorSpec, Worker};
 ///
 /// struct Pump {
 ///     shutdown: ShutdownSignal,
 /// }
 ///
-/// #[async_trait]
 /// impl Worker for Pump {
 ///     type Error = std::io::Error;
 ///
@@ -100,6 +114,10 @@ pub enum ChildType {
 ///         }
 ///     }
 /// }
+///
+/// // A factory that takes one argument receives the worker's signal.
+/// let spec = SupervisorSpec::new("app")
+///     .with_worker("pump", |shutdown| Pump { shutdown }, RestartPolicy::Permanent);
 /// ```
 #[derive(Clone, Debug)]
 pub struct ShutdownSignal {
@@ -126,9 +144,13 @@ impl ShutdownSignal {
     }
 
     /// Returns `true` if shutdown has already been requested.
+    ///
+    /// Like [`cancelled`](Self::cancelled), this also reports `true` once the
+    /// supervisor side is gone, since nothing is left to supervise the worker.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        *self.rx.borrow()
+        // `has_changed` only errors when every sender has been dropped.
+        *self.rx.borrow() || self.rx.has_changed().is_err()
     }
 
     /// Resolves once shutdown has been requested.
@@ -150,9 +172,35 @@ impl ShutdownSignal {
     }
 }
 
-/// Shared context for stateful workers with in-memory key-value store.
+/// Process-local, concurrency-safe key-value store for sharing state between
+/// workers.
 ///
-/// Provides a process-local, concurrency-safe storage for workers to share state.
+/// Cloning is cheap and every clone sees the same data, so sharing state is a
+/// matter of capturing a clone in each worker's factory. Because the context
+/// lives outside the workers, its contents survive worker restarts.
+///
+/// ```
+/// use ash_flare::{RestartPolicy, SupervisorSpec, Worker, WorkerContext};
+///
+/// struct Counter { ctx: WorkerContext }
+///
+/// impl Worker for Counter {
+///     type Error = std::io::Error;
+///     async fn run(&mut self) -> Result<(), Self::Error> {
+///         self.ctx.update("count", |v| {
+///             let n = v.and_then(|v| v.as_u64()).unwrap_or(0);
+///             Some(serde_json::json!(n + 1))
+///         });
+///         Ok(())
+///     }
+/// }
+///
+/// let ctx = WorkerContext::new();
+/// let spec = SupervisorSpec::new("app")
+///     .with_worker("a", { let ctx = ctx.clone(); move || Counter { ctx: ctx.clone() } }, RestartPolicy::Transient)
+///     .with_worker("b", { let ctx = ctx.clone(); move || Counter { ctx: ctx.clone() } }, RestartPolicy::Transient);
+/// ```
+///
 /// The store is backed by `DashMap` for lock-free concurrent access.
 ///
 /// # Performance
@@ -279,7 +327,10 @@ impl WorkerContext {
     {
         match self.store.entry(key.to_owned()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                let old_value = entry.get().clone();
+                // Move the value out rather than cloning it: a clone costs time
+                // proportional to the value's size, all while this shard's lock
+                // is held. If `f` panics the key is left holding `null`.
+                let old_value = std::mem::take(entry.get_mut());
                 match f(Some(old_value)) {
                     Some(new_value) => {
                         entry.insert(new_value);
@@ -304,23 +355,27 @@ impl Default for WorkerContext {
     }
 }
 
-// ============================================================================
-// Beam-ready Foundation Types
-// ============================================================================
+#[cfg(test)]
+mod tests {
+    use super::ShutdownSignal;
 
-/// Process identifier (Beam-style) - foundation for future linking/monitoring
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Pid(pub u64);
+    #[test]
+    fn is_cancelled_tracks_the_request_and_a_vanished_supervisor() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let signal = ShutdownSignal::new(rx);
+        assert!(!signal.is_cancelled());
 
-/// Extended exit reason for future Beam-like semantics
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub enum ExitReason {
-    /// Normal termination
-    Normal,
-    /// Killed/aborted
-    Killed,
-    /// Terminated with error
-    Error(String),
+        tx.send(true).expect("receiver alive");
+        assert!(signal.is_cancelled(), "an explicit request is reported");
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let orphaned = ShutdownSignal::new(rx);
+        drop(tx);
+        assert!(
+            orphaned.is_cancelled(),
+            "with the supervisor side gone, the worker must be told to stop"
+        );
+
+        assert!(!ShutdownSignal::never().is_cancelled());
+    }
 }

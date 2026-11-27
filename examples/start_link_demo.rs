@@ -4,7 +4,6 @@
 //! initialize successfully before being added to the supervision tree.
 
 use ash_flare::{RestartPolicy, SupervisorHandle, Worker, supervision_tree};
-use async_trait::async_trait;
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -23,8 +22,6 @@ impl std::error::Error for WorkerError {}
 struct GoodWorker {
     name: String,
 }
-
-#[async_trait]
 impl Worker for GoodWorker {
     type Error = WorkerError;
 
@@ -48,8 +45,6 @@ impl Worker for GoodWorker {
 struct BadWorker {
     name: String,
 }
-
-#[async_trait]
 impl Worker for BadWorker {
     type Error = WorkerError;
 
@@ -73,8 +68,6 @@ impl Worker for BadWorker {
 struct SlowWorker {
     name: String,
 }
-
-#[async_trait]
 impl Worker for SlowWorker {
     type Error = WorkerError;
 
@@ -104,7 +97,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         supervisors: []
     };
 
-    let supervisor: SupervisorHandle<GoodWorker> = SupervisorHandle::start(spec);
+    let supervisor: SupervisorHandle =
+        SupervisorHandle::start(spec).expect("valid supervisor spec");
     println!("✓ Supervisor started\n");
 
     // Test 1: Successfully initialize a worker
@@ -134,7 +128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         workers: [],
         supervisors: []
     };
-    let bad_supervisor: SupervisorHandle<BadWorker> = SupervisorHandle::start(bad_spec);
+    let bad_supervisor: SupervisorHandle =
+        SupervisorHandle::start(bad_spec).expect("valid supervisor spec");
 
     // Test 2: Worker that fails during initialization
     println!("--- Test 2: Worker with initialization failure ---");
@@ -163,7 +158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         workers: [],
         supervisors: []
     };
-    let slow_supervisor: SupervisorHandle<SlowWorker> = SupervisorHandle::start(slow_spec);
+    let slow_supervisor: SupervisorHandle =
+        SupervisorHandle::start(slow_spec).expect("valid supervisor spec");
 
     // Test 3: Worker that times out during initialization
     println!("--- Test 3: Worker with initialization timeout ---");

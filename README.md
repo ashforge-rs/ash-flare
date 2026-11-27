@@ -1,17 +1,21 @@
 # ash-flare
 
-A Rust supervision framework inspired by Erlang/OTP, with Python bindings.
+Fault-tolerant supervision trees for Rust, modelled on Erlang/OTP, with Python bindings.
 
 ## Features
 
-- Process supervision trees with automatic restart
-- Configurable restart policies (Permanent, Temporary, Transient)
-- Supervision strategies (OneForOne, OneForAll, RestForOne)
-- Exponential restart backoff, so a crash-looping child cannot peg a CPU core
-- Graceful shutdown: workers are asked to stop and run their cleanup hook
-- Worker messaging via mailboxes
-- Distributed supervision across network nodes
-- Python bindings with asyncio integration
+- Supervision trees with `OneForOne`, `OneForAll` and `RestForOne` strategies
+- `Permanent`, `Transient` and `Temporary` restart policies, restart intensity and exponential backoff
+- Workers of different types in one tree; panics are supervised like any other failure
+- OTP shutdown semantics: reverse start order, per-child `BrutalKill` / `Timeout` / `Infinity`
+- Significant children and `auto_shutdown`
+- Nested supervisors reachable by registered name, and a policy for when the whole tree gives up
+- Lossless monitors, links between children, and killing children
+- Typed mailboxes with call/cast that survive restarts, and a name registry
+- Worker pools and children started under generated ids
+- Isolated workers and stall detection for blocking or CPU-bound work
+- Remote control over TCP or Unix sockets with a versioned, authenticated handshake
+- Python bindings
 
 ## Installation
 
@@ -23,34 +27,21 @@ cargo add ash-flare
 
 ### Python
 
-Install from [GitHub Releases](https://github.com/ashforge-rs/ash-flare/releases):
+Wheels are published on [GitHub Releases](https://github.com/ashforge-rs/ash-flare/releases):
 
 ```bash
-# Find the wheel for your platform on the releases page, then:
 uv add "ash-flare @ https://github.com/ashforge-rs/ash-flare/releases/download/vVERSION/ash_flare-VERSION-cp39-abi3-PLATFORM.whl"
 ```
 
-For example, on Linux x86_64 with version 2.2.0:
-
-```bash
-uv add "ash-flare @ https://github.com/ashforge-rs/ash-flare/releases/download/v2.2.0/ash_flare-2.2.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
-```
-
-> Check the [releases page](https://github.com/ashforge-rs/ash-flare/releases) for the exact wheel filename matching your version and platform.
-
-## Quick Start
-
-### Rust
+## Quick start
 
 ```rust
 use ash_flare::{RestartPolicy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use std::time::Duration;
 
-struct MyWorker;
+struct Ticker;
 
-#[async_trait]
-impl Worker for MyWorker {
+impl Worker for Ticker {
     type Error = std::io::Error;
 
     async fn run(&mut self) -> Result<(), Self::Error> {
@@ -61,159 +52,243 @@ impl Worker for MyWorker {
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-// Describe the tree, then start it.
-let spec = SupervisorSpec::new("my_supervisor")
-    .with_restart_delay(Duration::from_secs(5))
-    .with_worker("worker", || MyWorker, RestartPolicy::Permanent);
+let spec = SupervisorSpec::new("app")
+    .with_worker("ticker", || Ticker, RestartPolicy::Permanent);
 
-let handle = SupervisorHandle::start(spec);
-
-// Add a child at runtime, waiting for its `initialize` to succeed.
-handle.start_child_linked(
-    "late-worker",
-    || MyWorker,
-    RestartPolicy::Permanent,
-    Duration::from_secs(5),
-).await?;
-
+let handle = SupervisorHandle::start(spec)?;
 handle.shutdown().await?;
 # Ok(())
 # }
 ```
 
-Workers are created by a factory closure so the supervisor can build a fresh
-instance on every restart.
+`Worker` methods are plain `async fn`s; `Error` only needs `Display`, so `anyhow::Error` or `String` work.
+The factory builds a fresh worker on every restart. A factory that takes a `ShutdownSignal` lets the worker
+observe cooperative shutdown. `start` rejects an invalid tree, for example one with duplicate child ids.
 
-### Python
-
-Workers are callables; the supervisor calls one each time the child starts.
-
-```python
-import ash_flare as af
-
-def worker_fn():
-    print("working")
-
-spec = af.SupervisorSpec("my_supervisor")
-spec.with_restart_strategy(af.RestartStrategy.one_for_one())
-spec.add_worker("worker", af.RestartPolicy.permanent(), worker_fn)
-
-handle = af.SupervisorHandle.start(spec)
-
-# Add a child at runtime.
-handle.start_child("late-worker", af.RestartPolicy.permanent(), worker_fn)
-```
-
-Accept a `should_stop` argument to be told when to wind down. A worker that
-ignores it is abandoned once the shutdown timeout elapses:
-
-```python
-def pump(should_stop):
-    while not should_stop():
-        do_one_unit_of_work()
-
-spec = af.SupervisorSpec("my_supervisor")
-spec.with_shutdown_timeout(5.0)
-spec.add_worker("pump", af.RestartPolicy.permanent(), pump)
-```
-
-Stateful supervisors pass their shared context as the first argument, so
-workers can coordinate through it:
-
-```python
-def counter(ctx):
-    ctx.set("count", (ctx.get("count") or 0) + 1)
-
-spec = af.StatefulSupervisorSpec("counters")
-spec.add_worker("c1", af.RestartPolicy.permanent(), counter)
-# `def counter(ctx, should_stop)` also works.
-```
-
-Worker exceptions are reported through the standard `logging` module under the
-`ash_flare` logger, with the original traceback.
-
-For async Python usage with `asyncio.to_thread()`:
-
-```python
-import asyncio
-
-async def send_message(handle, msg):
-    await asyncio.to_thread(handle.send, msg)
-```
-
-Blocking calls release the GIL, so other Python threads keep running while a
-supervisor call or `Mailbox.recv()` is waiting.
-
-### CPU-bound workers
-
-CPython serialises pure-Python CPU work across threads, so CPU-bound workers do
-not run in parallel — this is a property of CPython, not of ash-flare. IO-bound
-workers (sleeping, network, subprocess) do run in parallel. For CPU-bound work,
-use separate processes or move the hot loop into Rust.
-
-## Graceful shutdown
-
-When a worker is terminated the supervisor asks it to stop before forcing it
-down. A worker that takes a `ShutdownSignal` can wind down on its own terms:
+## Supervision
 
 ```rust
-use ash_flare::{RestartPolicy, ShutdownSignal, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
+use ash_flare::{
+    AutoShutdown, ChildSpec, RestartBackoff, RestartIntensity, RestartPolicy, RestartStrategy,
+    Shutdown, SupervisorSpec, Worker,
+};
 use std::time::Duration;
 
-struct Pump {
-    shutdown: ShutdownSignal,
-}
+# struct Job;
+# impl Worker for Job {
+#     type Error = String;
+#     async fn run(&mut self) -> Result<(), Self::Error> { Ok(()) }
+# }
+let spec = SupervisorSpec::new("app")
+    .with_restart_strategy(RestartStrategy::RestForOne)
+    .with_restart_intensity(RestartIntensity::new(5, 10))
+    .with_restart_backoff(RestartBackoff::exponential(
+        Duration::from_millis(100),
+        Duration::from_secs(30),
+    ))
+    .with_auto_shutdown(AutoShutdown::AnySignificant)
+    .with_child(
+        ChildSpec::new("job", || Job)
+            .restart(RestartPolicy::Transient)
+            .shutdown(Shutdown::Timeout(Duration::from_secs(10)))
+            .significant(true),
+    );
+```
 
-#[async_trait]
-impl Worker for Pump {
-    type Error = std::io::Error;
+Children are stopped in reverse start order, each within its own shutdown setting
+(`ShutdownOrder::Concurrent` stops them together). A worker's `shutdown` hook runs unless it is
+killed or overruns its timeout. Nested supervisors are added with `with_supervisor`.
 
-    async fn run(&mut self) -> Result<(), Self::Error> {
-        loop {
-            tokio::select! {
-                () = self.shutdown.cancelled() => return Ok(()),
-                () = tokio::time::sleep(Duration::from_millis(50)) => {
-                    // ... one unit of work ...
-                }
-            }
-        }
-    }
+## The top of the tree
 
-    async fn shutdown(&mut self) -> Result<(), Self::Error> {
-        // Runs before the task goes away: flush, commit, release.
-        Ok(())
-    }
+```rust
+use ash_flare::{ChildExitReason, GiveUp, Registry, SupervisorHandle, SupervisorSpec};
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let registry = Registry::new();
+let app = SupervisorHandle::start(
+    SupervisorSpec::new("app")
+        // When the whole tree fails, exit so systemd or Kubernetes restarts the process.
+        .with_give_up(GiveUp::ExitProcess(1))
+        .with_supervisor(SupervisorSpec::new("rooms").with_registered_name(&registry, "rooms")),
+)?;
+
+// A nested supervisor, by registered name (always its current run) or by child id.
+let rooms = registry.whereis::<SupervisorHandle>("rooms").unwrap();
+let same = app.child_supervisor("rooms").await?;
+# assert_eq!(rooms.name(), same.name());
+
+app.shutdown().await?;
+assert_eq!(app.wait().await, ChildExitReason::Shutdown);
+# Ok(())
+# }
+```
+
+A nested supervisor that gives up escalates to its parent. A top-level one stops, and `wait()` tells
+whoever holds its handle why; with `GiveUp::ExitProcess` it also exits the process once the tree is
+down, as an OTP node does when a permanent application fails. `with_registered_name` registers each
+run of a supervisor before its children start, so workers can find their own or a sibling supervisor
+by name, as with `{local, Name}` in OTP.
+
+## Messaging
+
+```rust
+use ash_flare::{MailboxConfig, MailboxHandle, Registry, Reply, mailbox};
+use std::time::Duration;
+
+enum Counter {
+    Add(u64),
+    Get(Reply<u64>),
 }
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-let spec = SupervisorSpec::new("root")
-    .with_shutdown_timeout(Duration::from_secs(5))
-    .with_worker_signal("pump", |signal| Pump { shutdown: signal }, RestartPolicy::Permanent);
+let (handle, inbox) = mailbox::<Counter>(MailboxConfig::default());
+tokio::spawn(async move {
+    let mut total = 0;
+    while let Some(message) = inbox.recv().await {
+        match message {
+            Counter::Add(n) => total += n,
+            Counter::Get(reply) => reply.send(total),
+        }
+    }
+});
 
-let handle = SupervisorHandle::start(spec);
-handle.shutdown().await?;
+let registry = Registry::new();
+let _name = registry.register("counter", handle);
+
+let counter = registry.whereis::<MailboxHandle<Counter>>("counter").unwrap();
+counter.send(Counter::Add(2)).await?;
+assert_eq!(counter.call(Counter::Get, Duration::from_secs(1)).await?, 2);
 # Ok(())
 # }
 ```
 
-`shutdown` runs after `run` returns — whether it completed, failed, or was
-cancelled. A worker that cannot be cancelled within the shutdown timeout (for
-example one that blocks the thread without awaiting) is aborted instead, and
-does not get the hook.
+`send` is a cast; `call` sends a request carrying a `Reply` and waits for the answer. Clones of a
+`Mailbox` share one queue: give each worker instance a clone and its mailbox survives restarts, or
+give clones to several workers to form a pool. `Registry` finds handles by name; a `Registration`
+unregisters when dropped.
+
+## Monitoring and links
+
+```rust
+use ash_flare::{RestartPolicy, ShutdownSignal, SupervisorEvent, SupervisorHandle, SupervisorSpec, Worker, link};
+
+# struct Service(ShutdownSignal);
+# impl Worker for Service {
+#     type Error = std::io::Error;
+#     async fn run(&mut self) -> Result<(), Self::Error> { self.0.cancelled().await; Ok(()) }
+# }
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let db = SupervisorHandle::start(SupervisorSpec::new("db").with_worker("pool", Service, RestartPolicy::Permanent))?;
+let web = SupervisorHandle::start(SupervisorSpec::new("web").with_worker("cache", Service, RestartPolicy::Permanent))?;
+
+let mut pool = db.monitor_child("pool");
+let _link = link(&db, "pool", &web, "cache");
+
+db.kill_child("pool").await?;
+assert!(matches!(pool.recv().await, Some(SupervisorEvent::ChildTerminated { .. })));
+# db.shutdown().await?;
+# web.shutdown().await?;
+# Ok(())
+# }
+```
+
+Every started child is reported terminated exactly once. `monitor()` and `monitor_child(id)` never
+miss an event: events queue until read, as with `erlang:monitor/2`. `subscribe()` is a bounded
+broadcast for logs and metrics, where a reader that falls far behind skips the oldest events.
+Linked children share their fate: when one ends other than normally, the other is killed and
+restarted by its own supervisor. Links are built on monitors, so none misses a termination.
+
+## Blocking work
+
+Async tasks cannot be preempted. A worker that blocks or computes without awaiting holds up its runtime
+thread. `ChildSpec::isolated(true)` runs a worker on a thread of its own, and
+`SupervisorSpec::with_stall_detection(threshold)` reports workers stuck in a poll as
+`SupervisorEvent::ChildStalled`.
+
+Stopping or killing a worker takes effect at its next await point. An isolated worker stuck in a loop
+that never awaits is reported as killed and replaced, but its old thread runs on until it yields, so
+the old and new instance can briefly run side by side. Run code that may never yield in a separate
+process if that matters.
+
+## Remote control
+
+```rust,no_run
+use ash_flare::distributed::{RemoteSupervisorHandle, SupervisorServer};
+# use ash_flare::{SupervisorHandle, SupervisorSpec};
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let handle = SupervisorHandle::start(SupervisorSpec::new("app"))?;
+let server = SupervisorServer::new(handle).with_cookie("secret");
+tokio::spawn(server.listen_unix("/tmp/app.sock"));
+
+let remote = RemoteSupervisorHandle::unix("/tmp/app.sock").with_cookie("secret");
+println!("{:?}", remote.status().await?);
+# Ok(())
+# }
+```
+
+Both ends prove they know the cookie without sending it; a client without it is refused before any
+command runs. Traffic after the handshake is not encrypted or integrity-protected, and anyone with the
+cookie may run any command, including `shutdown`. Bind to loopback or a Unix socket with restrictive
+permissions, or put the listener behind an encrypted transport such as a VPN, SSH tunnel or TLS proxy.
+
+## Python
+
+```python
+import ash_flare as af
+
+def worker(should_stop):
+    while not should_stop():
+        ...
+
+spec = af.SupervisorSpec("app")
+spec.add_worker("worker", af.RestartPolicy.permanent(), worker, shutdown=af.Shutdown.timeout(5.0))
+handle = af.SupervisorHandle.start(spec)
+
+for event in handle.subscribe():
+    print(event)
+```
+
+Each Python worker runs on its own thread, and blocking calls release the GIL. CPU-bound Python code
+is still serialised by the interpreter; use processes or Rust for parallel computation. Worker
+exceptions are logged through the `ash_flare` logger with their traceback.
+
+`subscribe()` misses no event. `SupervisorHandle.wait(timeout=None)` blocks until a supervisor stops
+and returns why; `SupervisorSpec.with_give_up(GiveUp.exit_process(1))` exits the process when a
+top-level supervisor gives up. A nested supervisor is reached with `handle.child_supervisor(id)`, or by
+`SupervisorHandle.whereis(name)` after `with_registered_name(name)`.
+
+## Migrating from 3.x
+
+- Remove `#[async_trait]` from `impl Worker`; `SupervisorSpec`, `SupervisorHandle` and `SupervisorServer` are no longer generic.
+- `StatefulSupervisorSpec` is removed: capture a `WorkerContext` clone in each factory.
+- `*_with_signal` methods are removed: pass a `|signal| ...` factory to the plain methods.
+- `SupervisorHandle::start` returns `Result`; `shutdown` waits for the tree to stop.
+- Children stop in reverse start order by default.
+- `ChildExitReason`, `SupervisorError` and `DistributedError` are `#[non_exhaustive]`.
+- `ChildInfo::restart_policy` is `Some` for nested supervisors too, with their own policy.
+- `RemoteSupervisorHandle::connect_tcp` / `connect_unix` are replaced by `tcp` / `unix`, which connect on
+  the first command; `connect_supervisor!` no longer needs `.await?`.
+- Remote clients and servers must both be 4.x.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 ## Documentation
 
-- [Rust API Documentation](https://docs.rs/ash-flare)
-- [Examples](examples/)
-- [Python Examples](python_examples/)
+- [API documentation](https://docs.rs/ash-flare)
+- [Architecture](architecture.md)
+- [Examples](examples/) and [Python examples](python_examples/)
 
 ## License
 
-Apache License 2.0 - see [LICENSE](LICENSE)
+Apache License 2.0. See [LICENSE](LICENSE).
 
 ## Acknowledgements
 
-- Inspired by Erlang/OTP supervision principle
+- Inspired by Erlang/OTP supervision principles
 - Some code generated with the help of AI tools

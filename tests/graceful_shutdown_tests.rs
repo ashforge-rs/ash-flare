@@ -5,10 +5,8 @@
 //! `JoinHandle::abort`, so the hook never ran and any cleanup was silently lost.
 
 use ash_flare::{
-    RestartPolicy, ShutdownSignal, StatefulSupervisorHandle, StatefulSupervisorSpec,
-    SupervisorHandle, SupervisorSpec, Worker, WorkerContext,
+    RestartPolicy, ShutdownSignal, SupervisorHandle, SupervisorSpec, Worker, WorkerContext,
 };
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -18,8 +16,6 @@ struct Cooperative {
     shutdown: ShutdownSignal,
     cleaned_up: Arc<AtomicBool>,
 }
-
-#[async_trait]
 impl Worker for Cooperative {
     type Error = std::io::Error;
 
@@ -39,8 +35,6 @@ impl Worker for Cooperative {
 struct Stubborn {
     cleaned_up: Arc<AtomicBool>,
 }
-
-#[async_trait]
 impl Worker for Stubborn {
     type Error = std::io::Error;
 
@@ -61,8 +55,6 @@ struct SlowCleanup {
     shutdown: ShutdownSignal,
     finished_cleanup: Arc<AtomicBool>,
 }
-
-#[async_trait]
 impl Worker for SlowCleanup {
     type Error = std::io::Error;
 
@@ -83,7 +75,7 @@ async fn shutdown_hook_runs_on_graceful_supervisor_shutdown() {
     let cleaned = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&cleaned);
 
-    let spec = SupervisorSpec::new("root").with_worker_signal(
+    let spec = SupervisorSpec::new("root").with_worker(
         "w",
         move |signal| Cooperative {
             shutdown: signal,
@@ -92,7 +84,7 @@ async fn shutdown_hook_runs_on_graceful_supervisor_shutdown() {
         RestartPolicy::Permanent,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(100)).await;
     handle.shutdown().await.expect("shutdown request");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -108,7 +100,7 @@ async fn shutdown_hook_runs_on_terminate_child() {
     let cleaned = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&cleaned);
 
-    let spec = SupervisorSpec::new("root").with_worker_signal(
+    let spec = SupervisorSpec::new("root").with_worker(
         "w",
         move |signal| Cooperative {
             shutdown: signal,
@@ -117,7 +109,7 @@ async fn shutdown_hook_runs_on_terminate_child() {
         RestartPolicy::Permanent,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(100)).await;
     handle.terminate_child("w").await.expect("terminate");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -146,7 +138,7 @@ async fn worker_ignoring_signal_is_still_cancelled_and_cleaned_up() {
             RestartPolicy::Permanent,
         );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(100)).await;
     handle.shutdown().await.expect("shutdown request");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -166,7 +158,7 @@ async fn slow_cleanup_is_bounded_by_shutdown_timeout() {
 
     let spec = SupervisorSpec::new("root")
         .with_shutdown_timeout(Duration::from_millis(150))
-        .with_worker_signal(
+        .with_worker(
             "w",
             move |signal| SlowCleanup {
                 shutdown: signal,
@@ -175,7 +167,7 @@ async fn slow_cleanup_is_bounded_by_shutdown_timeout() {
             RestartPolicy::Permanent,
         );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let started = std::time::Instant::now();
@@ -202,8 +194,6 @@ async fn plain_worker_api_still_works_without_signal() {
     struct Quick {
         runs: Arc<AtomicUsize>,
     }
-
-    #[async_trait]
     impl Worker for Quick {
         type Error = std::io::Error;
         async fn run(&mut self) -> Result<(), Self::Error> {
@@ -221,7 +211,7 @@ async fn plain_worker_api_still_works_without_signal() {
         RestartPolicy::Temporary,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(200)).await;
     handle.shutdown().await.expect("shutdown");
 
@@ -229,17 +219,15 @@ async fn plain_worker_api_still_works_without_signal() {
 }
 
 #[tokio::test]
-async fn stateful_shutdown_hook_runs_and_context_survives() {
+async fn shutdown_hook_can_write_to_a_shared_context() {
     let cleaned = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&cleaned);
 
     struct StatefulCooperative {
         shutdown: ShutdownSignal,
-        context: Arc<WorkerContext>,
+        context: WorkerContext,
         cleaned_up: Arc<AtomicBool>,
     }
-
-    #[async_trait]
     impl Worker for StatefulCooperative {
         type Error = std::io::Error;
 
@@ -257,25 +245,25 @@ async fn stateful_shutdown_hook_runs_and_context_survives() {
         }
     }
 
-    let spec = StatefulSupervisorSpec::new("root").with_worker_signal(
+    let context = WorkerContext::new();
+    let worker_context = context.clone();
+    let spec = SupervisorSpec::new("root").with_worker(
         "w",
-        move |ctx, signal| StatefulCooperative {
+        move |signal| StatefulCooperative {
             shutdown: signal,
-            context: ctx,
+            context: worker_context.clone(),
             cleaned_up: Arc::clone(&flag),
         },
         RestartPolicy::Permanent,
     );
-    let context = Arc::clone(spec.context());
 
-    let handle = StatefulSupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(100)).await;
-    handle.shutdown().await.expect("shutdown request");
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    handle.shutdown().await.expect("shutdown");
 
     assert!(
         cleaned.load(Ordering::SeqCst),
-        "stateful Worker::shutdown must run on graceful shutdown"
+        "Worker::shutdown must run on graceful shutdown"
     );
     assert_eq!(
         context.get("drained"),
@@ -291,4 +279,199 @@ async fn shutdown_signal_never_does_not_fire() {
 
     let fired = tokio::time::timeout(Duration::from_millis(150), signal.cancelled()).await;
     assert!(fired.is_err(), "`never` must not resolve");
+}
+
+/// `SupervisorHandle::shutdown` resolves only once the whole tree has stopped,
+/// nested supervisors included, so no sleep is needed to observe cleanup.
+#[tokio::test]
+async fn shutdown_waits_for_the_whole_tree() {
+    let cleaned = Arc::new(AtomicUsize::new(0));
+
+    let cooperative = |cleaned: &Arc<AtomicUsize>| {
+        let cleaned = Arc::clone(cleaned);
+        move |signal: ShutdownSignal| SlowCleanup {
+            shutdown: signal,
+            cleaned: Arc::clone(&cleaned),
+        }
+    };
+
+    struct SlowCleanup {
+        shutdown: ShutdownSignal,
+        cleaned: Arc<AtomicUsize>,
+    }
+    impl Worker for SlowCleanup {
+        type Error = std::io::Error;
+
+        async fn run(&mut self) -> Result<(), Self::Error> {
+            self.shutdown.cancelled().await;
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> Result<(), Self::Error> {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.cleaned.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let nested = SupervisorSpec::new("nested").with_worker(
+        "inner",
+        cooperative(&cleaned),
+        RestartPolicy::Permanent,
+    );
+    let spec = SupervisorSpec::new("root")
+        .with_worker("outer", cooperative(&cleaned), RestartPolicy::Permanent)
+        .with_supervisor(nested);
+
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    handle.shutdown().await.expect("shutdown");
+
+    assert_eq!(
+        cleaned.load(Ordering::SeqCst),
+        2,
+        "both shutdown hooks must have finished when shutdown returns"
+    );
+    assert!(handle.is_stopped());
+    assert!(handle.shutdown().await.is_err(), "already stopped");
+}
+
+/// With `ShutdownOrder::Concurrent`, children are stopped together and share one
+/// shutdown timeout, so the total
+/// is bounded by the timeout rather than growing with the number of children.
+#[tokio::test]
+async fn children_share_one_shutdown_timeout() {
+    struct OverrunningCleanup;
+    impl Worker for OverrunningCleanup {
+        type Error = std::io::Error;
+
+        async fn run(&mut self) -> Result<(), Self::Error> {
+            std::future::pending().await
+        }
+
+        async fn shutdown(&mut self) -> Result<(), Self::Error> {
+            // Far longer than the timeout: the worker has to be aborted.
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            Ok(())
+        }
+    }
+
+    let timeout = Duration::from_millis(200);
+    let mut spec = SupervisorSpec::new("root")
+        .with_shutdown_timeout(timeout)
+        .with_shutdown_order(ash_flare::ShutdownOrder::Concurrent);
+    for i in 0..3 {
+        spec = spec.with_worker(
+            format!("w{i}"),
+            || OverrunningCleanup,
+            RestartPolicy::Permanent,
+        );
+    }
+
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let started = std::time::Instant::now();
+    handle.shutdown().await.expect("shutdown");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= timeout,
+        "workers must get the full timeout, took {elapsed:?}"
+    );
+    assert!(
+        elapsed < timeout * 2,
+        "three overrunning workers must share one timeout (sequential would be {:?}), took {elapsed:?}",
+        timeout * 3
+    );
+}
+
+/// With `ShutdownOrder::Concurrent`, a `RestForOne` restart stops the affected
+/// siblings together, so restarting
+/// them takes about one cleanup rather than one per sibling.
+#[tokio::test]
+async fn rest_for_one_stops_affected_siblings_together() {
+    use ash_flare::{RestartBackoff, RestartStrategy};
+
+    /// Fails 50ms into its first run, then stays up.
+    struct CrashOnce {
+        starts: Arc<AtomicUsize>,
+    }
+    impl Worker for CrashOnce {
+        type Error = std::io::Error;
+
+        async fn run(&mut self) -> Result<(), Self::Error> {
+            if self.starts.fetch_add(1, Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                return Err(std::io::Error::other("first run fails"));
+            }
+            std::future::pending().await
+        }
+    }
+
+    /// Counts its starts and needs 100ms to clean up.
+    struct SlowSibling {
+        starts: Arc<AtomicUsize>,
+        shutdown: ShutdownSignal,
+    }
+    impl Worker for SlowSibling {
+        type Error = std::io::Error;
+
+        async fn run(&mut self) -> Result<(), Self::Error> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            self.shutdown.cancelled().await;
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> Result<(), Self::Error> {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(())
+        }
+    }
+
+    let crasher_starts = Arc::new(AtomicUsize::new(0));
+    let crasher = Arc::clone(&crasher_starts);
+    let mut spec = SupervisorSpec::new("root")
+        .with_restart_strategy(RestartStrategy::RestForOne)
+        .with_shutdown_order(ash_flare::ShutdownOrder::Concurrent)
+        .with_restart_backoff(RestartBackoff::none())
+        .with_worker(
+            "crasher",
+            move || CrashOnce {
+                starts: Arc::clone(&crasher),
+            },
+            RestartPolicy::Permanent,
+        );
+
+    let siblings: Vec<Arc<AtomicUsize>> = (0..4).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+    for (i, starts) in siblings.iter().enumerate() {
+        let starts = Arc::clone(starts);
+        spec = spec.with_worker(
+            format!("sibling-{i}"),
+            move |shutdown| SlowSibling {
+                starts: Arc::clone(&starts),
+                shutdown,
+            },
+            RestartPolicy::Permanent,
+        );
+    }
+
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
+    // Crash at ~50ms. Stopped together, every sibling is back by ~150ms; one
+    // after another, the last would only be back at ~450ms.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let restarted: Vec<usize> = siblings.iter().map(|s| s.load(Ordering::SeqCst)).collect();
+    assert_eq!(
+        crasher_starts.load(Ordering::SeqCst),
+        2,
+        "crasher restarted once"
+    );
+    assert_eq!(
+        restarted,
+        vec![2; 4],
+        "every sibling restarted once by 300ms"
+    );
+
+    handle.shutdown().await.expect("shutdown");
 }

@@ -1,77 +1,55 @@
 //! Supervisor errors
 
-use std::fmt;
+use std::time::Duration;
 
 /// Errors returned by supervisor operations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SupervisorError {
-    /// Supervisor has no children
-    NoChildren(String),
-    /// All children have failed
-    AllChildrenFailed(String),
-    /// Supervisor is shutting down
+    /// The supervisor has stopped, or is stopping, and no longer accepts commands.
+    #[error("supervisor '{0}' is shutting down - operation not permitted")]
     ShuttingDown(String),
-    /// Child with this ID already exists
+    /// A child with this ID already exists.
+    #[error("child with id '{0}' already exists - use a unique identifier")]
     ChildAlreadyExists(String),
-    /// Child with this ID not found
+    /// No child with this ID is supervised.
+    #[error("child with id '{0}' not found - it may have already terminated")]
     ChildNotFound(String),
-    /// Child initialization failed
+    /// The child with this ID is a worker, not a nested supervisor.
+    #[error("child with id '{0}' is a worker, not a supervisor")]
+    NotASupervisor(String),
+    /// Two children of one supervisor share an id.
+    #[error("supervisor '{supervisor}' has more than one child with id '{child_id}'")]
+    DuplicateChildId {
+        /// Name of the supervisor whose children clash
+        supervisor: String,
+        /// The id used more than once
+        child_id: String,
+    },
+    /// A child's settings contradict each other or the supervisor's.
+    #[error("invalid child '{child_id}' in supervisor '{supervisor}': {reason}")]
+    InvalidChildSpec {
+        /// Name of the supervisor the child belongs to
+        supervisor: String,
+        /// The child's id
+        child_id: String,
+        /// What is wrong
+        reason: String,
+    },
+    /// Child initialization failed.
+    #[error("child '{child_id}' initialization failed: {reason}")]
     InitializationFailed {
         /// ID of the child that failed to initialize
         child_id: String,
         /// Reason for initialization failure
         reason: String,
     },
-    /// Child initialization timed out
+    /// Child initialization timed out.
+    #[error("child '{child_id}' initialization timed out after {timeout:?}")]
     InitializationTimeout {
         /// ID of the child that timed out
         child_id: String,
         /// Duration after which timeout occurred
-        timeout: std::time::Duration,
+        timeout: Duration,
     },
 }
-
-impl fmt::Display for SupervisorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SupervisorError::NoChildren(name) => {
-                write!(f, "supervisor '{name}' has no children")
-            }
-            SupervisorError::AllChildrenFailed(name) => {
-                write!(
-                    f,
-                    "all children failed for supervisor '{name}' - restart intensity limit exceeded"
-                )
-            }
-            SupervisorError::ShuttingDown(name) => {
-                write!(
-                    f,
-                    "supervisor '{name}' is shutting down - operation not permitted"
-                )
-            }
-            SupervisorError::ChildAlreadyExists(id) => {
-                write!(
-                    f,
-                    "child with id '{id}' already exists - use a unique identifier"
-                )
-            }
-            SupervisorError::ChildNotFound(id) => {
-                write!(
-                    f,
-                    "child with id '{id}' not found - it may have already terminated"
-                )
-            }
-            SupervisorError::InitializationFailed { child_id, reason } => {
-                write!(f, "child '{child_id}' initialization failed: {reason}")
-            }
-            SupervisorError::InitializationTimeout { child_id, timeout } => {
-                write!(
-                    f,
-                    "child '{child_id}' initialization timed out after {timeout:?}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for SupervisorError {}

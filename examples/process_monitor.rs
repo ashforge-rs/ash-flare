@@ -1,7 +1,8 @@
 //! Process monitor example - supervising external system processes
 
-use ash_flare::{RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
+use ash_flare::{
+    RestartIntensity, RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker,
+};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::{Child, Command};
@@ -107,8 +108,6 @@ impl ProcessMonitor {
         Ok(())
     }
 }
-
-#[async_trait]
 impl Worker for ProcessMonitor {
     type Error = ProcessError;
 
@@ -154,6 +153,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let spec = SupervisorSpec::new("process-supervisor")
         .with_restart_strategy(RestartStrategy::OneForOne)
+        // The workers here fail on purpose, more often than the default of 3
+        // restarts in 5 seconds allows; past that the supervisor would give up.
+        .with_restart_intensity(RestartIntensity::new(10, 5))
         .with_worker(
             "web-server-monitor",
             || ProcessMonitor::new("web-server", "sleep", vec!["3".to_string()], 2),
@@ -170,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             RestartPolicy::Permanent,
         );
 
-    let supervisor = SupervisorHandle::start(spec);
+    let supervisor = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     println!("Started supervisor with 3 process monitors\n");
     println!("Watch as monitors detect failures and supervisor restarts them...\n");

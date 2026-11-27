@@ -4,7 +4,6 @@
 use ash_flare::{
     RestartBackoff, RestartIntensity, RestartPolicy, SupervisorHandle, SupervisorSpec, Worker,
 };
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -13,8 +12,6 @@ use std::time::Duration;
 struct CrashLoop {
     attempts: Arc<AtomicUsize>,
 }
-
-#[async_trait]
 impl Worker for CrashLoop {
     type Error = std::io::Error;
 
@@ -24,7 +21,7 @@ impl Worker for CrashLoop {
     }
 }
 
-fn crash_loop_spec(attempts: &Arc<AtomicUsize>) -> SupervisorSpec<CrashLoop> {
+fn crash_loop_spec(attempts: &Arc<AtomicUsize>) -> SupervisorSpec {
     let counter = Arc::clone(attempts);
     SupervisorSpec::new("root").with_worker(
         "crasher",
@@ -47,7 +44,7 @@ async fn backoff_prevents_restart_busy_loop() {
             Duration::from_secs(5),
         ));
 
-    let _handle = SupervisorHandle::start(spec);
+    let _handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let count = attempts.load(Ordering::SeqCst);
@@ -66,7 +63,7 @@ async fn default_backoff_is_not_immediate() {
     let spec =
         crash_loop_spec(&attempts).with_restart_intensity(RestartIntensity::new(1_000_000, 600));
 
-    let _handle = SupervisorHandle::start(spec);
+    let _handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     let count = attempts.load(Ordering::SeqCst);
@@ -83,7 +80,7 @@ async fn supervisor_terminates_when_restart_intensity_exceeded() {
         .with_restart_intensity(RestartIntensity::new(2, 60))
         .with_restart_backoff(RestartBackoff::none());
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     // Give the supervisor time to blow through its intensity limit.
     tokio::time::sleep(Duration::from_millis(300)).await;

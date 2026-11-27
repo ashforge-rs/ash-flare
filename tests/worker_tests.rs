@@ -1,5 +1,4 @@
 use ash_flare::{RestartPolicy, SupervisorHandle, SupervisorSpec, Worker};
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::time::{Duration, sleep};
@@ -8,8 +7,6 @@ struct TestWorker {
     counter: Arc<AtomicU32>,
     fail_after: Option<u32>,
 }
-
-#[async_trait]
 impl Worker for TestWorker {
     type Error = std::io::Error;
 
@@ -43,7 +40,7 @@ async fn test_worker_basic_lifecycle() {
         RestartPolicy::Temporary,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(100)).await;
 
     let count = counter.load(Ordering::SeqCst);
@@ -66,7 +63,7 @@ async fn test_worker_permanent_restart() {
         RestartPolicy::Permanent,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(200)).await;
 
     let count = counter.load(Ordering::SeqCst);
@@ -92,7 +89,7 @@ async fn test_worker_transient_normal_exit() {
         RestartPolicy::Transient,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(50)).await;
 
     let children = handle.which_children().await.unwrap();
@@ -126,7 +123,7 @@ async fn test_multiple_workers() {
             RestartPolicy::Permanent,
         );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(50)).await;
 
     let count1 = counter1.load(Ordering::SeqCst);

@@ -7,11 +7,13 @@
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use std::sync::Arc;
 
 use crate::distributed::{RemoteSupervisorHandle, SupervisorAddress};
+use pyo3::types::PyDict;
 
 use super::block_on_without_gil;
-use super::types::{PyChildInfo, PyChildType};
+use super::types::PyChildInfo;
 
 /// Python-facing supervisor address for distributed supervision
 #[pyclass(name = "SupervisorAddress", skip_from_py_object)]
@@ -49,59 +51,67 @@ impl PySupervisorAddress {
 /// Python-facing remote supervisor handle for distributed supervision
 #[pyclass(name = "RemoteSupervisorHandle")]
 pub struct PyRemoteSupervisorHandle {
-    inner: RemoteSupervisorHandle,
+    /// Shared rather than cloned per call: a clone opens its own connection,
+    /// and reusing one connection is what keeps repeated calls cheap.
+    inner: Arc<RemoteSupervisorHandle>,
+}
+
+impl PyRemoteSupervisorHandle {
+    fn with_cookie(handle: RemoteSupervisorHandle, cookie: Option<String>) -> Self {
+        let configured = match cookie {
+            Some(secret) => handle.with_cookie(secret),
+            None => handle,
+        };
+        Self {
+            inner: Arc::new(configured),
+        }
+    }
 }
 
 #[pymethods]
 impl PyRemoteSupervisorHandle {
+    /// A handle to a supervisor on TCP `addr`. No connection is made until
+    /// the first command; `cookie` authenticates both ends when set.
     #[staticmethod]
-    fn connect_tcp(addr: String, py: Python<'_>) -> PyResult<Self> {
-        let result = block_on_without_gil(py, async move {
-            RemoteSupervisorHandle::connect_tcp(addr).await
-        });
-
-        result
-            .map(|inner| PyRemoteSupervisorHandle { inner })
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to connect: {e}")))
+    #[pyo3(signature = (addr, *, cookie=None))]
+    fn connect_tcp(addr: String, cookie: Option<String>) -> Self {
+        Self::with_cookie(RemoteSupervisorHandle::tcp(addr), cookie)
     }
 
+    /// A handle to a supervisor on the Unix socket at `path`.
     #[staticmethod]
     #[cfg(unix)]
-    fn connect_unix(path: String, py: Python<'_>) -> PyResult<Self> {
-        let result = block_on_without_gil(py, async move {
-            RemoteSupervisorHandle::connect_unix(path).await
-        });
+    #[pyo3(signature = (path, *, cookie=None))]
+    fn connect_unix(path: String, cookie: Option<String>) -> Self {
+        Self::with_cookie(RemoteSupervisorHandle::unix(path), cookie)
+    }
 
-        result
-            .map(|inner| PyRemoteSupervisorHandle { inner })
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to connect: {e}")))
+    /// The remote supervisor's name, child count, restart strategy and
+    /// uptime in seconds.
+    fn status(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let handle = Arc::clone(&self.inner);
+        let status = block_on_without_gil(py, async move { handle.status().await })
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to get status: {e}")))?;
+        let dict = PyDict::new(py);
+        dict.set_item("name", status.name)?;
+        dict.set_item("children_count", status.children_count)?;
+        dict.set_item("restart_strategy", format!("{:?}", status.restart_strategy))?;
+        dict.set_item("uptime_secs", status.uptime_secs)?;
+        Ok(dict.into())
     }
 
     fn shutdown(&self, py: Python<'_>) -> PyResult<()> {
-        let handle = self.inner.clone();
+        let handle = Arc::clone(&self.inner);
         block_on_without_gil(py, async move { handle.shutdown().await })
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to shutdown: {e}")))
     }
 
     fn which_children(&self, py: Python<'_>) -> PyResult<Vec<PyChildInfo>> {
-        let handle = self.inner.clone();
+        let handle = Arc::clone(&self.inner);
         let result = block_on_without_gil(py, async move { handle.which_children().await });
 
         match result {
-            Ok(children) => {
-                // Convert distributed::ChildInfo to types::ChildInfo then to PyChildInfo
-                let py_children = children
-                    .into_iter()
-                    .map(|child| PyChildInfo {
-                        id: child.id,
-                        child_type: PyChildType {
-                            inner: child.child_type,
-                        },
-                        restart_policy: child.restart_policy,
-                    })
-                    .collect();
-                Ok(py_children)
-            }
+            Ok(children) => Ok(children.into_iter().map(PyChildInfo::from).collect()),
             Err(e) => Err(PyRuntimeError::new_err(format!(
                 "Failed to get children: {e}"
             ))),
@@ -109,7 +119,7 @@ impl PyRemoteSupervisorHandle {
     }
 
     fn terminate_child(&self, child_id: String, py: Python<'_>) -> PyResult<()> {
-        let handle = self.inner.clone();
+        let handle = Arc::clone(&self.inner);
         block_on_without_gil(py, async move { handle.terminate_child(&child_id).await })
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to terminate child: {e}")))
     }

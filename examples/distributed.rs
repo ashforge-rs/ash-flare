@@ -3,15 +3,17 @@
 //! This example demonstrates running a supervisor in a detached mode
 //! where it can be controlled via Unix socket commands.
 //!
+//! The server and client share a cookie, like an Erlang distribution cookie:
+//! a client without it is refused before any command runs. It is read from
+//! `ASH_FLARE_COOKIE`, with a fixed fallback for the demo.
+//!
 //! Note: This example requires Unix sockets and will not compile on Windows.
 
 #[cfg(unix)]
-use ash_flare::distributed::{RemoteSupervisorHandle, SupervisorAddress, SupervisorServer};
+use ash_flare::distributed::{RemoteSupervisorHandle, SupervisorServer};
 #[cfg(unix)]
 use ash_flare::{RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker};
 
-#[cfg(unix)]
-use async_trait::async_trait;
 #[cfg(unix)]
 use std::time::Duration;
 #[cfg(unix)]
@@ -44,7 +46,6 @@ impl Counter {
 }
 
 #[cfg(unix)]
-#[async_trait]
 impl Worker for Counter {
     type Error = WorkerError;
 
@@ -61,6 +62,12 @@ impl Worker for Counter {
         println!("[{}] shutdown", self.name);
         Ok(())
     }
+}
+
+/// The shared secret both ends must know.
+#[cfg(unix)]
+fn cookie() -> String {
+    std::env::var("ASH_FLARE_COOKIE").unwrap_or_else(|_| "ash-flare-demo-cookie".to_owned())
 }
 
 /// Runs the supervisor server in this process
@@ -84,9 +91,9 @@ async fn run_supervisor_server(socket_path: String) {
             RestartPolicy::Permanent,
         );
 
-    let supervisor = SupervisorHandle::start(spec);
+    let supervisor = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
-    let server = SupervisorServer::new(supervisor);
+    let server = SupervisorServer::new(supervisor).with_cookie(cookie());
 
     println!("\n🚀 Supervisor server starting...\n");
     if let Err(e) = server.listen_unix(&socket_path).await {
@@ -99,9 +106,16 @@ async fn run_supervisor_server(socket_path: String) {
 async fn run_client(socket_path: String) {
     sleep(Duration::from_secs(1)).await; // Wait for server to start
 
-    let remote = RemoteSupervisorHandle::new(SupervisorAddress::Unix(socket_path));
-
     println!("\n📡 Client connecting to remote supervisor...\n");
+
+    // Without the cookie, the server refuses the connection.
+    let stranger = RemoteSupervisorHandle::unix(socket_path.clone());
+    match stranger.status().await {
+        Ok(_) => println!("⚠️  A client without the cookie was let in"),
+        Err(e) => println!("🔒 Client without the cookie refused: {}\n", e),
+    }
+
+    let remote = RemoteSupervisorHandle::unix(socket_path).with_cookie(cookie());
 
     // Get status
     println!("🔍 Getting supervisor status...");
@@ -109,7 +123,7 @@ async fn run_client(socket_path: String) {
         Ok(status) => {
             println!("   Name: {}", status.name);
             println!("   Children: {}", status.children_count);
-            println!("   Strategy: {}", status.restart_strategy);
+            println!("   Strategy: {:?}", status.restart_strategy);
             println!("   Uptime: {}s", status.uptime_secs);
         }
         Err(e) => eprintln!("   Error: {}", e),

@@ -7,7 +7,7 @@ use tokio::time::{Duration, sleep};
 #[tokio::test]
 async fn test_supervisor_duplicate_child() {
     let spec = SupervisorSpec::new("duplicate-test");
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     // Add first child (permanent so it won't exit)
     let result1 = handle
@@ -28,8 +28,8 @@ async fn test_supervisor_duplicate_child() {
 
 #[tokio::test]
 async fn test_supervisor_terminate_nonexistent() {
-    let spec = SupervisorSpec::<QuickWorker>::new("terminate-test");
-    let handle = SupervisorHandle::start(spec);
+    let spec = SupervisorSpec::new("terminate-test");
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     let result = handle.terminate_child("nonexistent").await;
     assert!(result.is_err());
@@ -47,7 +47,7 @@ async fn test_permanent_worker_restart() {
             RestartPolicy::Permanent,
         );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(150)).await;
 
     // Permanent worker should be restarting
@@ -67,7 +67,7 @@ async fn test_transient_worker_no_restart_on_normal_exit() {
         RestartPolicy::Transient,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(30)).await;
 
     // Transient worker should exit normally and not restart
@@ -85,7 +85,7 @@ async fn test_temporary_worker_no_restart() {
         RestartPolicy::Temporary,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(30)).await;
 
     // Temporary worker should not restart even on error

@@ -2,10 +2,9 @@
 
 use super::context::PyWorkerContext;
 use crate::types::ShutdownSignal;
-use crate::worker::{Worker, WorkerError};
+use crate::worker::Worker;
 use pyo3::prelude::*;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Extra arguments passed to a Python worker callable when it is invoked.
 #[derive(Clone)]
@@ -16,30 +15,45 @@ pub(crate) enum PyWorkerArgs {
     Context(PyWorkerContext),
 }
 
+/// A worker callable together with the positional arity it accepts.
+///
+/// Reading the arity means a round of `inspect.signature` calls. It is done
+/// once, when the worker is registered, rather than on every start and restart.
+pub(crate) struct PyWorkerFn {
+    callable: Py<PyAny>,
+    /// `None` when the signature cannot be introspected.
+    arity: Option<Arity>,
+}
+
+impl PyWorkerFn {
+    pub(crate) fn new(py: Python<'_>, callable: Py<PyAny>) -> Self {
+        let arity = positional_arity(py, &callable);
+        Self { callable, arity }
+    }
+}
+
 /// Python-compatible wrapper for Worker that accepts Python callables
 pub struct PyWorker {
     pub(crate) name: String,
-    pub(crate) callable: Arc<Py<PyAny>>,
+    pub(crate) callable: Arc<PyWorkerFn>,
     /// What to pass to the callable. Stateful supervisors pass their context.
     pub(crate) args: PyWorkerArgs,
-    /// Set when the supervisor asks this worker to stop. Python workers can
-    /// poll it via the `should_stop` argument they are handed.
-    pub(crate) cancelled: Arc<AtomicBool>,
-    /// Cooperative shutdown signal from the supervisor.
+    /// Cooperative shutdown signal from the supervisor. Python workers poll it
+    /// through the `should_stop` argument they are handed.
     pub(crate) shutdown: ShutdownSignal,
-    /// The in-flight Python call. A `spawn_blocking` task cannot be cancelled,
-    /// so this is kept across a cancellation of `run` and joined in `shutdown`.
-    body: Option<tokio::task::JoinHandle<Result<(), WorkerError>>>,
+    /// The outcome of the in-flight Python call. The call runs on a thread of
+    /// its own and cannot be cancelled, so this is kept across a cancellation
+    /// of `run` and waited for in `shutdown`.
+    body: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
 }
 
 impl PyWorker {
     /// Builds a worker that calls `callable` with no extra arguments.
-    pub(crate) fn new(name: String, callable: Arc<Py<PyAny>>, shutdown: ShutdownSignal) -> Self {
+    pub(crate) fn new(name: String, callable: Arc<PyWorkerFn>, shutdown: ShutdownSignal) -> Self {
         Self {
             name,
             callable,
             args: PyWorkerArgs::None,
-            cancelled: Arc::new(AtomicBool::new(false)),
             shutdown,
             body: None,
         }
@@ -48,7 +62,7 @@ impl PyWorker {
     /// Builds a worker that calls `callable` with the shared `WorkerContext`.
     pub(crate) fn with_context(
         name: String,
-        callable: Arc<Py<PyAny>>,
+        callable: Arc<PyWorkerFn>,
         context: PyWorkerContext,
         shutdown: ShutdownSignal,
     ) -> Self {
@@ -56,7 +70,6 @@ impl PyWorker {
             name,
             callable,
             args: PyWorkerArgs::Context(context),
-            cancelled: Arc::new(AtomicBool::new(false)),
             shutdown,
             body: None,
         }
@@ -69,56 +82,52 @@ impl PyWorker {
 #[pyclass(name = "ShouldStop", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyShouldStop {
-    flag: Arc<AtomicBool>,
+    /// Read directly, so no task is needed to mirror it into a flag: the
+    /// worker body runs on a thread of its own and simply polls this.
+    signal: ShutdownSignal,
 }
 
 #[pymethods]
 impl PyShouldStop {
     /// Returns `True` once the supervisor has asked this worker to stop.
     fn is_set(&self) -> bool {
-        self.flag.load(Ordering::SeqCst)
+        self.signal.is_cancelled()
     }
 
     /// Alias for `is_set()`, so the object can be used as `if should_stop():`.
     fn __call__(&self) -> bool {
-        self.flag.load(Ordering::SeqCst)
+        self.is_set()
     }
 
     fn __bool__(&self) -> bool {
-        self.flag.load(Ordering::SeqCst)
+        self.is_set()
     }
 
     fn __repr__(&self) -> String {
-        format!("ShouldStop(set={})", self.flag.load(Ordering::SeqCst))
+        format!("ShouldStop(set={})", self.is_set())
     }
 }
 
-#[async_trait::async_trait]
 impl Worker for PyWorker {
-    type Error = WorkerError;
+    type Error = String;
 
     async fn run(&mut self) -> Result<(), Self::Error> {
         let callable = Arc::clone(&self.callable);
         let name = self.name.clone();
         let args = self.args.clone();
-        let cancelled = Arc::clone(&self.cancelled);
-
-        // Watch for cooperative shutdown and raise the flag the Python worker
-        // polls. The worker body runs on a blocking thread that cannot be
-        // preempted, so a flag is the only way to ask it to stop.
+        // The worker body runs on a thread of its own that cannot be preempted,
+        // so polling this signal is the only way to ask it to stop.
         let signal = self.shutdown.clone();
-        let flag = Arc::clone(&self.cancelled);
-        let watcher = tokio::spawn(async move {
-            signal.cancelled().await;
-            flag.store(true, Ordering::SeqCst);
-        });
 
-        // Run the Python callable on a blocking-pool thread. `spawn_blocking`
-        // is used on its own here: spawning a bare OS thread as well would
-        // double the per-worker thread cost for no benefit.
-        self.body = Some(tokio::task::spawn_blocking(move || {
+        // Run the Python callable on a thread of its own. A worker typically
+        // runs for its whole life, so it must not occupy tokio's blocking pool,
+        // whose 512 threads would otherwise cap the number of Python workers
+        // with no error for the ones left waiting.
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let thread_name = format!("ash-flare-py:{name}");
+        let call = move || {
             Python::attach(|py| {
-                let should_stop = PyShouldStop { flag: cancelled };
+                let should_stop = PyShouldStop { signal };
                 let outcome = match &args {
                     PyWorkerArgs::None => {
                         call_with_optional_args(py, &callable, None, &should_stop)
@@ -134,55 +143,47 @@ impl Worker for PyWorker {
                     // Report through Python's own logging so the failure is
                     // visible by default instead of vanishing silently.
                     log_worker_failure(py, &name, &detail);
-                    WorkerError::WorkerFailed(format!("worker '{name}' raised: {detail}"))
+                    format!("worker '{name}' raised: {detail}")
                 })
             })
-        }));
-
-        // The handle stays in `self` while the call is in flight. If this future
-        // is dropped for a cooperative shutdown, `shutdown` joins it there
-        // rather than leaving the Python callable running unsupervised.
-        let Some(handle) = self.body.as_mut() else {
-            return Err(WorkerError::WorkerFailed(
-                "worker body handle went missing".to_owned(),
-            ));
         };
-        let result = handle.await;
+        std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                let _delivered = result_tx.send(call());
+            })
+            .map_err(|e| format!("could not start the worker's thread: {e}"))?;
+        self.body = Some(result_rx);
+
+        // The receiver stays in `self` while the call is in flight. If this
+        // future is dropped for a cooperative shutdown, `shutdown` waits for
+        // it there rather than leaving the Python callable running unsupervised.
+        let Some(outcome) = self.body.as_mut() else {
+            return Err("worker body handle went missing".to_owned());
+        };
+        let result = outcome.await;
         self.body = None;
 
-        watcher.abort();
-
-        match result {
-            Ok(inner) => inner,
-            Err(join_err) => Err(WorkerError::WorkerFailed(format!(
-                "worker task failed to run: {join_err}"
-            ))),
-        }
-    }
-
-    async fn initialize(&mut self) -> Result<(), Self::Error> {
-        Ok(())
+        result.unwrap_or_else(|_| Err("worker thread ended without a result".to_owned()))
     }
 
     /// Waits for a Python callable that is still running after `run` was
     /// cancelled.
     ///
-    /// `spawn_blocking` work cannot be interrupted, so simply returning here
+    /// A running Python call cannot be interrupted, so simply returning here
     /// would report a graceful stop while the callable kept running - and the
     /// supervisor would start its replacement on top of it. Blocking instead
     /// puts the wait inside the supervisor's shutdown timeout: a worker that
     /// polls `should_stop` returns promptly, and one that ignores it is aborted
     /// and correctly reported as not having stopped gracefully.
     async fn shutdown(&mut self) -> Result<(), Self::Error> {
-        let Some(handle) = self.body.take() else {
+        let Some(outcome) = self.body.take() else {
             return Ok(());
         };
 
-        // Raise the flag here too: the watcher task does it as well, but this
-        // does not depend on that task being scheduled first.
-        self.cancelled.store(true, Ordering::SeqCst);
-
-        let _joined = handle.await;
+        // `run` is only cancelled once shutdown has been signalled, so the
+        // body already sees `should_stop` as set.
+        let _finished = outcome.await;
         Ok(())
     }
 }
@@ -196,7 +197,7 @@ impl Worker for PyWorker {
 /// registration API - and, crucially, the worker body is only ever entered once.
 fn call_with_optional_args(
     py: Python<'_>,
-    callable: &Arc<Py<PyAny>>,
+    worker_fn: &PyWorkerFn,
     context: Option<&PyWorkerContext>,
     should_stop: &PyShouldStop,
 ) -> PyResult<Py<PyAny>> {
@@ -215,7 +216,8 @@ fn call_with_optional_args(
         None => vec![vec![stop_obj.clone_ref(py)], vec![]],
     };
 
-    if let Some(accepted) = positional_arity(py, callable) {
+    let callable = &worker_fn.callable;
+    if let Some(accepted) = &worker_fn.arity {
         for arity in candidates {
             if accepted.accepts(arity.len()) {
                 return callable.call1(py, pyo3::types::PyTuple::new(py, arity)?);
@@ -250,6 +252,7 @@ fn call_with_optional_args(
 }
 
 /// How many positional arguments a callable accepts.
+#[derive(Clone, Copy)]
 struct Arity {
     required: usize,
     /// `None` when the callable takes `*args` and so accepts any count.
@@ -274,7 +277,7 @@ impl Arity {
 ///
 /// Returns `None` when the signature cannot be determined, which is the case for
 /// some builtins and C extension callables.
-fn positional_arity(py: Python<'_>, callable: &Arc<Py<PyAny>>) -> Option<Arity> {
+fn positional_arity(py: Python<'_>, callable: &Py<PyAny>) -> Option<Arity> {
     let inspect = py.import("inspect").ok()?;
     let signature = inspect
         .call_method1("signature", (callable.bind(py),))
@@ -294,8 +297,8 @@ fn positional_arity(py: Python<'_>, callable: &Arc<Py<PyAny>>) -> Option<Arity> 
     let mut required = 0_usize;
     let mut limit = Some(0_usize);
 
-    for param in params.try_iter().ok()? {
-        let param = param.ok()?;
+    for item in params.try_iter().ok()? {
+        let param = item.ok()?;
         let kind = param.getattr("kind").ok()?;
 
         if kind.eq(&var_positional).ok()? {

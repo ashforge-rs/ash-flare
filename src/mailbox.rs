@@ -1,9 +1,55 @@
-//! Optional mailbox system for workers
+//! Typed mailboxes for message-passing workers.
 //!
-//! This module provides simple message-passing capabilities for workers,
-//! allowing them to receive string messages via a mailbox.
+//! A mailbox is a queue with any number of senders ([`MailboxHandle`]) and a
+//! receiving end ([`Mailbox`]). Messages are `String`s unless another type is
+//! chosen, typically an enum describing everything a worker understands.
+//!
+//! # Surviving restarts
+//!
+//! Cloning a [`Mailbox`] shares its queue. Capture one in a worker's factory
+//! and hand each new instance a clone: senders keep working across restarts,
+//! and messages sent while the worker was restarting are waiting for its
+//! replacement. Several workers holding clones of one mailbox form a pool,
+//! each message going to whichever is free.
+//!
+//! # Requests and replies
+//!
+//! [`MailboxHandle::send`] is a one-way message (OTP's `cast`).
+//! [`MailboxHandle::call`] sends a message carrying a [`Reply`] and waits for
+//! the answer (OTP's `call`):
+//!
+//! ```
+//! use ash_flare::mailbox::{mailbox, MailboxConfig, Reply};
+//! use std::time::Duration;
+//!
+//! enum Counter {
+//!     Add(u64),
+//!     Get(Reply<u64>),
+//! }
+//!
+//! # #[tokio::main]
+//! # async fn main() {
+//! let (handle, inbox) = mailbox::<Counter>(MailboxConfig::default());
+//!
+//! tokio::spawn(async move {
+//!     let mut total = 0;
+//!     while let Some(message) = inbox.recv().await {
+//!         match message {
+//!             Counter::Add(n) => total += n,
+//!             Counter::Get(reply) => reply.send(total),
+//!         }
+//!     }
+//! });
+//!
+//! handle.send(Counter::Add(2)).await.unwrap();
+//! let total = handle.call(Counter::Get, Duration::from_secs(1)).await.unwrap();
+//! assert_eq!(total, 2);
+//! # }
+//! ```
 
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// Configuration for mailbox capacity
 #[derive(Debug, Clone, Copy)]
@@ -42,19 +88,35 @@ impl MailboxConfig {
     }
 }
 
-/// Handle for sending messages to a mailbox
-#[derive(Clone)]
-pub struct MailboxHandle {
-    tx: MailboxSender,
-    worker_id: String,
+/// Sending end of a mailbox. Cheap to clone.
+pub struct MailboxHandle<M = String> {
+    tx: MailboxSender<M>,
+    worker_id: Arc<str>,
 }
 
-enum MailboxSender {
-    Bounded(mpsc::Sender<String>),
-    Unbounded(mpsc::UnboundedSender<String>),
+impl<M> Clone for MailboxHandle<M> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            worker_id: Arc::clone(&self.worker_id),
+        }
+    }
 }
 
-impl Clone for MailboxSender {
+impl<M> std::fmt::Debug for MailboxHandle<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailboxHandle")
+            .field("worker_id", &self.worker_id)
+            .finish_non_exhaustive()
+    }
+}
+
+enum MailboxSender<M> {
+    Bounded(mpsc::Sender<M>),
+    Unbounded(mpsc::UnboundedSender<M>),
+}
+
+impl<M> Clone for MailboxSender<M> {
     fn clone(&self) -> Self {
         match self {
             Self::Bounded(tx) => Self::Bounded(tx.clone()),
@@ -63,59 +125,66 @@ impl Clone for MailboxSender {
     }
 }
 
-impl MailboxHandle {
-    pub(crate) fn new_bounded(tx: mpsc::Sender<String>, worker_id: impl Into<String>) -> Self {
-        Self {
-            tx: MailboxSender::Bounded(tx),
-            worker_id: worker_id.into(),
-        }
-    }
-
-    pub(crate) fn new_unbounded(
-        tx: mpsc::UnboundedSender<String>,
-        worker_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            tx: MailboxSender::Unbounded(tx),
-            worker_id: worker_id.into(),
-        }
-    }
-
-    /// Send a message to the worker (async, waits if mailbox full)
+impl<M> MailboxHandle<M> {
+    /// Sends a message, waiting for room if the mailbox is bounded and full.
     ///
     /// # Errors
     ///
-    /// Returns `SendError::Closed` if the receiver has been dropped.
-    pub async fn send(&self, message: impl Into<String>) -> Result<(), SendError> {
+    /// Returns `SendError::Closed` if every [`Mailbox`] has been dropped.
+    pub async fn send(&self, message: impl Into<M>) -> Result<(), SendError> {
         let msg = message.into();
         match &self.tx {
-            MailboxSender::Bounded(tx) => tx
-                .send(msg)
-                .await
-                .map_err(|_| SendError::Closed(self.worker_id.clone())),
-            MailboxSender::Unbounded(tx) => tx
-                .send(msg)
-                .map_err(|_| SendError::Closed(self.worker_id.clone())),
+            MailboxSender::Bounded(tx) => tx.send(msg).await.map_err(|_| self.closed()),
+            MailboxSender::Unbounded(tx) => tx.send(msg).map_err(|_| self.closed()),
         }
     }
 
-    /// Try to send a message without blocking
+    /// Sends a message without waiting.
     ///
     /// # Errors
     ///
-    /// Returns `TrySendError::Full` if the mailbox is full or `TrySendError::Closed` if the receiver has been dropped.
-    pub fn try_send(&self, message: impl Into<String>) -> Result<(), TrySendError> {
+    /// Returns `TrySendError::Full` if the mailbox is full or `TrySendError::Closed` if every [`Mailbox`] has been dropped.
+    pub fn try_send(&self, message: impl Into<M>) -> Result<(), TrySendError> {
         let msg = message.into();
         match &self.tx {
             MailboxSender::Bounded(tx) => tx.try_send(msg).map_err(|e| match e {
                 mpsc::error::TrySendError::Full(_) => TrySendError::Full,
                 mpsc::error::TrySendError::Closed(_) => {
-                    TrySendError::Closed(self.worker_id.clone())
+                    TrySendError::Closed(self.worker_id.to_string())
                 }
             }),
             MailboxSender::Unbounded(tx) => tx
                 .send(msg)
-                .map_err(|_| TrySendError::Closed(self.worker_id.clone())),
+                .map_err(|_| TrySendError::Closed(self.worker_id.to_string())),
+        }
+    }
+
+    /// Sends a request and waits for its reply, like OTP's `gen_server:call`.
+    ///
+    /// `request` builds the message from the [`Reply`] the receiver answers
+    /// through; for an enum variant holding only the `Reply`, the variant
+    /// itself can be passed.
+    ///
+    /// # Errors
+    ///
+    /// - [`CallError::Closed`] if every [`Mailbox`] has been dropped;
+    /// - [`CallError::Timeout`] if no reply arrived within `timeout`;
+    /// - [`CallError::NoReply`] if the receiver dropped the [`Reply`] without
+    ///   answering, for example because the worker crashed handling it.
+    pub async fn call<R>(
+        &self,
+        request: impl FnOnce(Reply<R>) -> M,
+        timeout: Duration,
+    ) -> Result<R, CallError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.send(request(Reply(reply_tx)))
+            .await
+            .map_err(|SendError::Closed(id)| CallError::Closed(id))?;
+
+        match tokio::time::timeout(timeout, reply_rx).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(_dropped)) => Err(CallError::NoReply),
+            Err(_elapsed) => Err(CallError::Timeout(timeout)),
         }
     }
 
@@ -133,101 +202,124 @@ impl MailboxHandle {
             MailboxSender::Unbounded(tx) => !tx.is_closed(),
         }
     }
+
+    fn closed(&self) -> SendError {
+        SendError::Closed(self.worker_id.to_string())
+    }
 }
 
-/// Mailbox for receiving messages in a worker
-pub struct Mailbox {
-    rx: MailboxReceiver,
+/// The receiving end of a [`MailboxHandle::call`]: answer the caller with
+/// [`Reply::send`]. Dropping it unanswered makes the call fail with
+/// [`CallError::NoReply`].
+#[derive(Debug)]
+pub struct Reply<R>(oneshot::Sender<R>);
+
+impl<R> Reply<R> {
+    /// Answers the caller. Does nothing if the caller has stopped waiting.
+    pub fn send(self, value: R) {
+        let _delivered = self.0.send(value);
+    }
+
+    /// Whether the caller is still waiting for the answer.
+    #[must_use]
+    pub fn is_wanted(&self) -> bool {
+        !self.0.is_closed()
+    }
 }
 
-enum MailboxReceiver {
-    Bounded(mpsc::Receiver<String>),
-    Unbounded(mpsc::UnboundedReceiver<String>),
+/// Receiving end of a mailbox.
+///
+/// Clones share one queue: hand a clone to each instance a worker's factory
+/// builds and the mailbox outlives restarts, or to several workers to form a
+/// pool. Each message is received by exactly one of them.
+pub struct Mailbox<M = String> {
+    rx: Arc<Mutex<MailboxReceiver<M>>>,
 }
 
-impl Mailbox {
-    pub(crate) fn new_bounded(rx: mpsc::Receiver<String>) -> Self {
+impl<M> Clone for Mailbox<M> {
+    fn clone(&self) -> Self {
         Self {
-            rx: MailboxReceiver::Bounded(rx),
+            rx: Arc::clone(&self.rx),
+        }
+    }
+}
+
+impl<M> std::fmt::Debug for Mailbox<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mailbox").finish_non_exhaustive()
+    }
+}
+
+enum MailboxReceiver<M> {
+    Bounded(mpsc::Receiver<M>),
+    Unbounded(mpsc::UnboundedReceiver<M>),
+}
+
+impl<M> Mailbox<M> {
+    fn new(rx: MailboxReceiver<M>) -> Self {
+        Self {
+            rx: Arc::new(Mutex::new(rx)),
         }
     }
 
-    pub(crate) fn new_unbounded(rx: mpsc::UnboundedReceiver<String>) -> Self {
-        Self {
-            rx: MailboxReceiver::Unbounded(rx),
-        }
-    }
-
-    /// Receive a message from the mailbox
-    pub async fn recv(&mut self) -> Option<String> {
-        match &mut self.rx {
+    /// Receives the next message, waiting until one arrives. Returns `None`
+    /// once every [`MailboxHandle`] has been dropped and the queue is empty.
+    ///
+    /// Cancel-safe: if the returned future is dropped (for example when the
+    /// worker is stopped), no message is lost.
+    pub async fn recv(&self) -> Option<M> {
+        let mut receiver = self.rx.lock().await;
+        match &mut *receiver {
             MailboxReceiver::Bounded(rx) => rx.recv().await,
             MailboxReceiver::Unbounded(rx) => rx.recv().await,
         }
     }
 
-    /// Try to receive a message without blocking
+    /// Receives a message if one is ready.
     ///
     /// # Errors
     ///
-    /// Returns `TryRecvError::Empty` if no messages available or `TryRecvError::Disconnected` if all senders dropped.
-    pub fn try_recv(&mut self) -> Result<String, TryRecvError> {
-        match &mut self.rx {
-            MailboxReceiver::Bounded(rx) => rx.try_recv().map_err(|e| match e {
-                mpsc::error::TryRecvError::Empty => TryRecvError::Empty,
-                mpsc::error::TryRecvError::Disconnected => TryRecvError::Disconnected,
-            }),
-            MailboxReceiver::Unbounded(rx) => rx.try_recv().map_err(|e| match e {
-                mpsc::error::TryRecvError::Empty => TryRecvError::Empty,
-                mpsc::error::TryRecvError::Disconnected => TryRecvError::Disconnected,
-            }),
-        }
+    /// Returns `TryRecvError::Empty` if no message is ready (including while
+    /// another clone is receiving) or `TryRecvError::Disconnected` if every
+    /// [`MailboxHandle`] has been dropped.
+    pub fn try_recv(&self) -> Result<M, TryRecvError> {
+        let Ok(mut receiver) = self.rx.try_lock() else {
+            return Err(TryRecvError::Empty);
+        };
+        let result = match &mut *receiver {
+            MailboxReceiver::Bounded(rx) => rx.try_recv(),
+            MailboxReceiver::Unbounded(rx) => rx.try_recv(),
+        };
+        result.map_err(|e| match e {
+            mpsc::error::TryRecvError::Empty => TryRecvError::Empty,
+            mpsc::error::TryRecvError::Disconnected => TryRecvError::Disconnected,
+        })
     }
 }
 
-/// Create a mailbox channel
+/// Creates a mailbox.
 #[must_use]
-pub fn mailbox(config: MailboxConfig) -> (MailboxHandle, Mailbox) {
-    match config {
-        MailboxConfig::Unbounded => {
-            let (tx, rx) = mpsc::unbounded_channel();
-            (
-                MailboxHandle::new_unbounded(tx, "unnamed"),
-                Mailbox::new_unbounded(rx),
-            )
-        }
-        MailboxConfig::Bounded { capacity } => {
-            let (tx, rx) = mpsc::channel(capacity);
-            (
-                MailboxHandle::new_bounded(tx, "unnamed"),
-                Mailbox::new_bounded(rx),
-            )
-        }
-    }
+pub fn mailbox<M>(config: MailboxConfig) -> (MailboxHandle<M>, Mailbox<M>) {
+    mailbox_named(config, "unnamed")
 }
 
-/// Create a mailbox channel with named worker
-pub fn mailbox_named(
+/// Creates a mailbox whose errors name `worker_id`.
+pub fn mailbox_named<M>(
     config: MailboxConfig,
-    worker_id_input: impl Into<String>,
-) -> (MailboxHandle, Mailbox) {
-    let worker_id = worker_id_input.into();
-    match config {
+    worker_id: impl Into<String>,
+) -> (MailboxHandle<M>, Mailbox<M>) {
+    let id: Arc<str> = Arc::from(worker_id.into());
+    let (tx, rx) = match config {
         MailboxConfig::Unbounded => {
             let (tx, rx) = mpsc::unbounded_channel();
-            (
-                MailboxHandle::new_unbounded(tx, worker_id),
-                Mailbox::new_unbounded(rx),
-            )
+            (MailboxSender::Unbounded(tx), MailboxReceiver::Unbounded(rx))
         }
         MailboxConfig::Bounded { capacity } => {
             let (tx, rx) = mpsc::channel(capacity);
-            (
-                MailboxHandle::new_bounded(tx, worker_id),
-                Mailbox::new_bounded(rx),
-            )
+            (MailboxSender::Bounded(tx), MailboxReceiver::Bounded(rx))
         }
-    }
+    };
+    (MailboxHandle { tx, worker_id: id }, Mailbox::new(rx))
 }
 
 /// Error when sending a message fails
@@ -258,4 +350,20 @@ pub enum TryRecvError {
     /// The mailbox is disconnected
     #[error("mailbox is disconnected")]
     Disconnected,
+}
+
+/// Error from [`MailboxHandle::call`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CallError {
+    /// The worker's mailbox is closed.
+    #[error("worker '{0}' mailbox is closed")]
+    Closed(String),
+    /// No reply arrived in time.
+    #[error("no reply within {0:?}")]
+    Timeout(Duration),
+    /// The receiver dropped the request without replying, for example because
+    /// the worker crashed while handling it.
+    #[error("the request was dropped without a reply")]
+    NoReply,
 }

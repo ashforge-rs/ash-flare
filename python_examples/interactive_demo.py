@@ -18,9 +18,10 @@ import sys
 from datetime import datetime
 
 
-def dummy_worker():
-    """Dummy worker function for visualization - sleeps indefinitely"""
-    time.sleep(3600)
+def dummy_worker(should_stop):
+    """Dummy worker for visualization - idles until asked to stop"""
+    while not should_stop():
+        time.sleep(0.1)
 
 
 class SupervisorMonitor:

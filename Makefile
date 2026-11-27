@@ -1,4 +1,4 @@
-.PHONY: help publish check test clean tag release release-patch release-minor release-major \
+.PHONY: help publish check test examples msrv bench bench-baseline bench-compare clean tag release release-patch release-minor release-major \
         dry-run pre-commit fmt lint doc build python-venv python-build python-install \
         python-dev python-clean python-test
 
@@ -16,10 +16,15 @@ help:
 	@echo "  check            - Run cargo check"
 	@echo "  build            - Build the project"
 	@echo "  test             - Run tests"
+	@echo "  examples         - Run every example that finishes on its own"
+	@echo "  msrv             - Check all targets build on the minimum supported Rust (1.88)"
 	@echo "  fmt              - Format code with rustfmt"
 	@echo "  lint             - Run clippy linter"
 	@echo "  doc              - Build documentation"
 	@echo "  doc-test         - Run documentation tests"
+	@echo "  bench            - Run benchmarks"
+	@echo "  bench-baseline   - Run benchmarks and save them as baseline BASELINE (default: main)"
+	@echo "  bench-compare    - Run benchmarks and compare against baseline BASELINE"
 	@echo "  clean            - Clean build artifacts"
 	@echo ""
 	@echo "Python Bindings (using UV):"
@@ -44,6 +49,19 @@ help:
 	@echo "Current version: $(CURRENT_VERSION)"
 
 # Development commands
+# Criterion stores baselines under target/criterion. Save one before a change
+# (`make bench-baseline`) and compare after it (`make bench-compare`).
+BASELINE ?= main
+
+bench:
+	cargo bench --bench supervision_benchmark
+
+bench-baseline:
+	cargo bench --bench supervision_benchmark -- --save-baseline $(BASELINE)
+
+bench-compare:
+	cargo bench --bench supervision_benchmark -- --baseline $(BASELINE)
+
 check:
 	@echo "Running cargo check..."
 	@cargo check --workspace --all-features
@@ -55,6 +73,14 @@ build:
 test:
 	@echo "Running tests..."
 	@cargo test --workspace --all-features --lib --bins
+
+examples:
+	@echo "Running examples..."
+	@./run_examples.sh
+
+msrv:
+	@echo "Checking all targets on Rust 1.88..."
+	@cargo +1.88 check --all-targets --all-features
 
 fmt:
 	@echo "Formatting code..."
@@ -188,8 +214,11 @@ python-venv:
 		echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"; \
 		exit 1; \
 	fi
-	@$(UV) venv $(VENV_DIR)
-	@echo "✓ Virtual environment created at $(VENV_DIR)"
+	@if [ -d $(VENV_DIR) ]; then \
+		echo "✓ Reusing existing virtual environment at $(VENV_DIR)"; \
+	else \
+		$(UV) venv $(VENV_DIR) && echo "✓ Virtual environment created at $(VENV_DIR)"; \
+	fi
 	@echo "Installing maturin..."
 	@$(UV) pip install --python $(VENV_DIR) maturin
 	@echo "✓ Maturin installed"
@@ -233,4 +262,5 @@ python-test: python-dev
 	@$(PYTHON) -c "from ash_flare import RestartStrategy; print('✓ RestartStrategy imported')"
 	@$(PYTHON) -c "from ash_flare import SupervisorSpec; print('✓ SupervisorSpec imported')"
 	@$(PYTHON) python/tests/test_worker_semantics.py
+	@$(PYTHON) python/tests/test_supervision_features.py
 	@echo "✓ All Python binding tests passed"

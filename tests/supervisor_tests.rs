@@ -2,7 +2,6 @@ use ash_flare::{
     ChildType, RestartIntensity, RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec,
     Worker,
 };
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::time::{Duration, sleep};
@@ -10,8 +9,6 @@ use tokio::time::{Duration, sleep};
 struct SimpleWorker {
     counter: Arc<AtomicU32>,
 }
-
-#[async_trait]
 impl Worker for SimpleWorker {
     type Error = std::io::Error;
 
@@ -25,8 +22,8 @@ impl Worker for SimpleWorker {
 
 #[tokio::test]
 async fn test_supervisor_start_and_shutdown() {
-    let spec: SupervisorSpec<SimpleWorker> = SupervisorSpec::new("test-supervisor");
-    let handle = SupervisorHandle::start(spec);
+    let spec: SupervisorSpec = SupervisorSpec::new("test-supervisor");
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     assert_eq!(handle.name(), "test-supervisor");
 
@@ -46,7 +43,7 @@ async fn test_supervisor_with_children() {
         RestartPolicy::Permanent,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(50)).await;
 
     let children = handle.which_children().await.unwrap();
@@ -60,7 +57,7 @@ async fn test_supervisor_with_children() {
 #[tokio::test]
 async fn test_supervisor_dynamic_start_child() {
     let spec = SupervisorSpec::new("test");
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     let counter = Arc::new(AtomicU32::new(0));
     let c = Arc::clone(&counter);
@@ -100,7 +97,7 @@ async fn test_supervisor_terminate_child() {
         RestartPolicy::Permanent,
     );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(50)).await;
 
     let children = handle.which_children().await.unwrap();
@@ -117,18 +114,18 @@ async fn test_supervisor_terminate_child() {
 
 #[tokio::test]
 async fn test_supervisor_restart_strategies() {
-    let spec_one_for_one: SupervisorSpec<SimpleWorker> =
+    let spec_one_for_one: SupervisorSpec =
         SupervisorSpec::new("test-one-for-one").with_restart_strategy(RestartStrategy::OneForOne);
 
-    let spec_one_for_all: SupervisorSpec<SimpleWorker> =
+    let spec_one_for_all: SupervisorSpec =
         SupervisorSpec::new("test-one-for-all").with_restart_strategy(RestartStrategy::OneForAll);
 
-    let spec_rest_for_one: SupervisorSpec<SimpleWorker> =
+    let spec_rest_for_one: SupervisorSpec =
         SupervisorSpec::new("test-rest-for-one").with_restart_strategy(RestartStrategy::RestForOne);
 
-    let h1 = SupervisorHandle::start(spec_one_for_one);
-    let h2 = SupervisorHandle::start(spec_one_for_all);
-    let h3 = SupervisorHandle::start(spec_rest_for_one);
+    let h1 = SupervisorHandle::start(spec_one_for_one).expect("valid supervisor spec");
+    let h2 = SupervisorHandle::start(spec_one_for_all).expect("valid supervisor spec");
+    let h3 = SupervisorHandle::start(spec_rest_for_one).expect("valid supervisor spec");
 
     h1.shutdown().await.unwrap();
     h2.shutdown().await.unwrap();
@@ -137,13 +134,13 @@ async fn test_supervisor_restart_strategies() {
 
 #[tokio::test]
 async fn test_supervisor_restart_intensity() {
-    let spec: SupervisorSpec<SimpleWorker> =
+    let spec: SupervisorSpec =
         SupervisorSpec::new("test").with_restart_intensity(RestartIntensity {
             max_restarts: 10,
             within_seconds: 5,
         });
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     handle.shutdown().await.unwrap();
 }
 
@@ -162,7 +159,7 @@ async fn test_nested_supervisors() {
 
     let parent_spec = SupervisorSpec::new("parent-supervisor").with_supervisor(child_spec);
 
-    let handle = SupervisorHandle::start(parent_spec);
+    let handle = SupervisorHandle::start(parent_spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(50)).await;
 
     let children = handle.which_children().await.unwrap();
@@ -212,7 +209,7 @@ async fn test_supervisor_multiple_children() {
             RestartPolicy::Permanent,
         );
 
-    let handle = SupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
     sleep(Duration::from_millis(50)).await;
 
     let children = handle.which_children().await.unwrap();

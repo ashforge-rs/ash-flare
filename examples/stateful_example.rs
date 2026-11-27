@@ -1,16 +1,14 @@
-// Minimal example to verify stateful supervisor compiles and works
-use ash_flare::{
-    RestartPolicy, StatefulSupervisorHandle, StatefulSupervisorSpec, Worker, WorkerContext,
-};
-use async_trait::async_trait;
-use std::sync::Arc;
+//! Minimal example of workers sharing state through a `WorkerContext`.
+//!
+//! The context is cheap to clone and every clone sees the same store, so
+//! sharing it is just a matter of capturing a clone in each worker's factory.
+use ash_flare::{RestartPolicy, SupervisorHandle, SupervisorSpec, Worker, WorkerContext};
 
 struct SimpleWorker {
     id: u32,
-    ctx: Arc<WorkerContext>,
+    ctx: WorkerContext,
 }
 
-#[async_trait]
 impl Worker for SimpleWorker {
     type Error = std::io::Error;
 
@@ -21,26 +19,35 @@ impl Worker for SimpleWorker {
     }
 }
 
+/// Builds a factory that hands each new worker a clone of the shared context.
+fn simple_worker(
+    id: u32,
+    ctx: &WorkerContext,
+) -> impl Fn() -> SimpleWorker + Send + Sync + 'static {
+    let ctx = ctx.clone();
+    move || SimpleWorker {
+        id,
+        ctx: ctx.clone(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create stateful supervisor with shared context
-    let spec = StatefulSupervisorSpec::new("auction-supervisor")
+    let store = WorkerContext::new();
+
+    let spec = SupervisorSpec::new("auction-supervisor")
         .with_worker(
             "auction-worker-1",
-            move |ctx: Arc<WorkerContext>| SimpleWorker { id: 1, ctx },
+            simple_worker(1, &store),
             RestartPolicy::Temporary,
         )
         .with_worker(
             "auction-worker-2",
-            move |ctx: Arc<WorkerContext>| SimpleWorker { id: 2, ctx },
+            simple_worker(2, &store),
             RestartPolicy::Temporary,
         );
 
-    // Get reference to shared store
-    let store = Arc::clone(spec.context());
-
-    // Start the supervisor
-    let handle = StatefulSupervisorHandle::start(spec);
+    let handle = SupervisorHandle::start(spec).expect("valid supervisor spec");
 
     // Give workers time to run
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

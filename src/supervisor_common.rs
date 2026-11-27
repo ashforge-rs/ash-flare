@@ -1,17 +1,20 @@
-//! Shared internal utilities for supervisor implementations
+//! Internal supervision logic: restart decisions and the worker lifecycle
 
+use crate::panic::CatchUnwind;
 use crate::restart::{BackoffTracker, RestartPolicy, RestartStrategy, RestartTracker};
-use crate::types::{ChildExitReason, ChildId, ShutdownSignal};
-use crate::worker::Worker;
+use crate::stall::{Monitored, PollMonitor};
+use crate::supervisor::SupervisorCommand;
+use crate::types::{ChildExitReason, ShutdownSignal};
+use crate::worker::DynWorker;
+use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// What a supervisor should do after one of its children terminated.
 ///
-/// Produced by [`decide_restart`], which owns the supervision semantics shared
-/// by the stateless and stateful supervisors. Keeping this in one place means a
-/// change to restart behaviour cannot be applied to one runtime and forgotten in
-/// the other.
+/// Produced by [`decide_restart`], which owns the supervision semantics so the
+/// runtime only has to carry decisions out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestartDecision {
     /// The supervisor stopped this child itself; there is nothing to decide.
@@ -34,10 +37,9 @@ pub(crate) enum RestartDecision {
 ///
 /// This is the single source of truth for supervision semantics: policy check,
 /// restart-intensity accounting, and backoff. It is deliberately free of any
-/// runtime-specific types so both supervisor implementations can share it.
+/// runtime types so it can be unit-tested in isolation.
 ///
-/// `policy` is `None` for nested supervisors, which are always treated as
-/// permanent.
+/// A `policy` of `None` is treated as permanent.
 pub(crate) fn decide_restart(
     policy: Option<RestartPolicy>,
     reason: ChildExitReason,
@@ -56,11 +58,12 @@ pub(crate) fn decide_restart(
         return RestartDecision::Ignore;
     }
 
-    // Nested supervisors have no policy of their own and are always permanent.
     let should_restart = match policy {
         None | Some(RestartPolicy::Permanent) => true,
         Some(RestartPolicy::Temporary) => false,
-        Some(RestartPolicy::Transient) => reason == ChildExitReason::Abnormal,
+        Some(RestartPolicy::Transient) => {
+            matches!(reason, ChildExitReason::Abnormal | ChildExitReason::Killed)
+        }
     };
 
     if !should_restart {
@@ -350,10 +353,37 @@ mod tests {
     }
 }
 
-/// Message sent when a worker terminates
-pub(crate) struct WorkerTermination {
-    pub id: ChildId,
-    pub reason: ChildExitReason,
+/// Displays as `supervisor/worker` without allocating.
+struct QualifiedName<'a>(&'a str, &'a str);
+
+impl fmt::Display for QualifiedName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.0, self.1)
+    }
+}
+
+/// Everything a running worker needs besides the worker itself.
+pub(crate) struct Lifecycle {
+    pub supervisor_name: Arc<str>,
+    pub worker_id: Arc<str>,
+    pub instance: u64,
+    pub control_tx: mpsc::UnboundedSender<SupervisorCommand>,
+    /// Told the outcome of `initialize` when the start is linked.
+    pub init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    pub shutdown: ShutdownSignal,
+    pub poll_monitor: Option<Arc<PollMonitor>>,
+}
+
+/// Wraps a call into user code: panics become errors, and each poll is timed
+/// when stall detection is on.
+fn guard<F: std::future::Future + Unpin>(
+    future: F,
+    monitor: Option<&PollMonitor>,
+) -> CatchUnwind<Monitored<'_, F>> {
+    CatchUnwind(Monitored {
+        inner: future,
+        monitor,
+    })
 }
 
 /// Runs a worker with initialization, execution, and shutdown lifecycle
@@ -361,20 +391,28 @@ pub(crate) struct WorkerTermination {
 /// When `shutdown` is triggered the worker's `run` future is dropped at its next
 /// await point, but `shutdown` is still awaited so cleanup runs. This is what
 /// makes graceful termination different from aborting the task outright.
-pub(crate) async fn run_worker<W: Worker, Cmd>(
-    supervisor_name: String,
-    worker_id: ChildId,
-    mut worker: W,
-    control_tx: mpsc::UnboundedSender<Cmd>,
-    init_tx: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    shutdown: ShutdownSignal,
-) where
-    Cmd: From<WorkerTermination>,
-{
-    let qualified_name = format!("{supervisor_name}/{worker_id}");
+pub(crate) async fn run_worker(mut worker: Box<dyn DynWorker>, lifecycle: Lifecycle) {
+    let Lifecycle {
+        supervisor_name,
+        worker_id,
+        instance,
+        control_tx,
+        init_tx,
+        shutdown,
+        poll_monitor,
+    } = lifecycle;
+    // Times each poll of the worker when stall detection is on.
+    let monitor = poll_monitor.as_deref();
+    // Rendered only when a log line is actually emitted, so a worker spawn
+    // does not allocate a "supervisor/worker" string up front.
+    let qualified_name = QualifiedName(&supervisor_name, &worker_id);
 
-    // Initialize the worker
-    match worker.initialize().await {
+    // Every call into user code is guarded: a panic is reported as a failure
+    // like any other, so the supervisor sees the exit and applies its policy.
+    match guard(worker.initialize(), monitor)
+        .await
+        .and_then(std::convert::identity)
+    {
         Ok(()) => {
             // Send initialization success confirmation if linked
             if let Some(tx) = init_tx {
@@ -389,15 +427,13 @@ pub(crate) async fn run_worker<W: Worker, Cmd>(
             );
             // Send initialization failure if linked
             if let Some(tx) = init_tx {
-                let _send = tx.send(Err(err.to_string()));
+                let _send = tx.send(Err(err));
             }
-            let _send = control_tx.send(
-                WorkerTermination {
-                    id: worker_id,
-                    reason: ChildExitReason::Abnormal,
-                }
-                .into(),
-            );
+            let _send = control_tx.send(SupervisorCommand::ChildTerminated {
+                id: worker_id,
+                instance,
+                reason: ChildExitReason::Abnormal,
+            });
             return;
         }
     }
@@ -414,7 +450,7 @@ pub(crate) async fn run_worker<W: Worker, Cmd>(
             tracing::debug!(worker = %qualified_name, "worker shutdown requested");
             ChildExitReason::Shutdown
         }
-        result = worker.run() => match result {
+        result = guard(worker.run(), monitor) => match result.and_then(std::convert::identity) {
             Ok(()) => {
                 tracing::debug!(worker = %qualified_name, "worker completed normally");
                 ChildExitReason::Normal
@@ -431,7 +467,10 @@ pub(crate) async fn run_worker<W: Worker, Cmd>(
     };
 
     // Shutdown the worker
-    if let Err(err) = worker.shutdown().await {
+    if let Err(err) = guard(worker.shutdown(), monitor)
+        .await
+        .and_then(std::convert::identity)
+    {
         tracing::error!(
             worker = %qualified_name,
             error = %err,
@@ -442,11 +481,9 @@ pub(crate) async fn run_worker<W: Worker, Cmd>(
     tracing::debug!(worker = %qualified_name, "worker stopped");
 
     // Notify supervisor of termination
-    let _send = control_tx.send(
-        WorkerTermination {
-            id: worker_id,
-            reason: exit_reason,
-        }
-        .into(),
-    );
+    let _send = control_tx.send(SupervisorCommand::ChildTerminated {
+        id: worker_id,
+        instance,
+        reason: exit_reason,
+    });
 }

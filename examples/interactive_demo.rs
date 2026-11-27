@@ -10,7 +10,6 @@
 use ash_flare::{
     ChildType, RestartPolicy, RestartStrategy, SupervisorHandle, SupervisorSpec, Worker,
 };
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,8 +49,6 @@ impl DemoWorker {
         }
     }
 }
-
-#[async_trait]
 impl Worker for DemoWorker {
     type Error = WorkerError;
 
@@ -162,7 +159,7 @@ impl WorkerStats {
 // ============================================================================
 
 async fn render_tree(
-    root: &SupervisorHandle<DemoWorker>,
+    root: &SupervisorHandle,
     stats: &Arc<RwLock<WorkerStats>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Clear screen and move cursor to top
@@ -222,7 +219,7 @@ async fn render_children_recursive(
     prefix: &str,
     _is_root: bool,
     stats: &WorkerStats,
-    _parent_handle: &SupervisorHandle<DemoWorker>,
+    _parent_handle: &SupervisorHandle,
     depth: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     const MAX_DEPTH: usize = 10; // Prevent infinite recursion
@@ -303,7 +300,7 @@ async fn render_children_recursive(
 // Demo Scenarios
 // ============================================================================
 
-fn create_demo_tree(stats: Arc<RwLock<WorkerStats>>) -> SupervisorSpec<DemoWorker> {
+fn create_demo_tree(stats: Arc<RwLock<WorkerStats>>) -> SupervisorSpec {
     // Create a complex, multi-level tree structure
 
     // Level 3: Database cluster
@@ -493,7 +490,7 @@ async fn main() {
 
     // Build and start the supervisor tree
     let tree_spec = create_demo_tree(stats.clone());
-    let root = SupervisorHandle::start(tree_spec);
+    let root = SupervisorHandle::start(tree_spec).expect("valid supervisor spec");
 
     println!("📦 Supervisor tree started!");
     println!("⏳ Initializing workers...\n");

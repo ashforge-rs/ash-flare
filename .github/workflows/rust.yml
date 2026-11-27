@@ -51,11 +51,29 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace --all-features --verbose --lib --bins
       
+      # Unit and integration tests (tests/*.rs). Benchmarks are left out:
+      # they are heavy, and `make bench` runs them on demand.
       - name: Run tests
-        run: cargo test --workspace --all-features --verbose --lib --bins
+        run: cargo test --workspace --all-features --verbose --lib --bins --tests
       
       - name: Run doc tests
         run: cargo test --workspace --doc --all-features
+
+  examples:
+    name: Run Examples
+    runs-on: ubuntu-latest
+    needs: [format-and-lint]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run examples
+        run: ./run_examples.sh
 
   coverage:
     name: Code Coverage
@@ -170,5 +188,7 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
 
+      # All targets, so examples, tests and benches cannot use newer APIs
+      # either; the library alone would not catch those.
       - name: Check MSRV compatibility
-        run: cargo check -p ash-flare --all-features
+        run: cargo check -p ash-flare --all-targets --all-features
